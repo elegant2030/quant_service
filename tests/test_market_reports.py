@@ -152,6 +152,24 @@ class ReportTests(unittest.TestCase):
                     live_fetcher=lambda _: live,
                     send=False,
                 )
+                report["delivery"] = {
+                    "attempted": True,
+                    "sent": True,
+                    "error": None,
+                    "attempted_at": "2026-09-14T16:31:00+00:00",
+                }
+                store.write_json(
+                    "reports/market/us/2026-09-14/midday.json",
+                    report,
+                )
+                regenerated, regenerated_artifacts = build_market_brief(
+                    store,
+                    "us",
+                    "midday",
+                    datetime(2026, 9, 14, 16, 32, tzinfo=timezone.utc),
+                    live_fetcher=lambda _: live,
+                    send=False,
+                )
             self.assertEqual(len(report["sectors"]), 5)
             self.assertEqual(len(report["stocks"]), 15)
             self.assertTrue(artifacts.json_path.is_file())
@@ -159,6 +177,8 @@ class ReportTests(unittest.TestCase):
             self.assertTrue(artifacts.gpt_json_path.is_file())
             self.assertTrue(artifacts.gpt_markdown_path.is_file())
             self.assertEqual(report["gpt_analysis"]["status"], "disabled")
+            self.assertTrue(regenerated["delivery"]["sent"])
+            self.assertTrue(regenerated_artifacts.sent)
             self.assertIn("美股实时快照(36)", report["data_mode"])
             self.assertIn("候选股票 TOP15", render_telegram(report))
             self.assertIn("技术面", report["stocks"][0]["reason"]["basis"])

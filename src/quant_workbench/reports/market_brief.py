@@ -9,6 +9,7 @@ silently promoted into canonical data.
 from __future__ import annotations
 
 import io
+import json
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -990,17 +991,28 @@ def build_market_brief(
         "prompt_version": report["gpt_analysis"].get("prompt_version"),
         "material_sha256": report["gpt_analysis"].get("material_sha256"),
     }
-    sent = False
-    send_error: str | None = None
-    if send:
+    prior_delivery: dict[str, Any] = {}
+    existing_json_path = store.root / base.with_suffix(".json")
+    if existing_json_path.is_file():
+        try:
+            prior_delivery = json.loads(existing_json_path.read_text(encoding="utf-8")).get(
+                "delivery", {}
+            )
+        except (OSError, ValueError):
+            prior_delivery = {}
+    sent = bool(prior_delivery.get("sent"))
+    send_error: str | None = prior_delivery.get("error")
+    attempted_at = prior_delivery.get("attempted_at")
+    if send and not sent:
         config = load_alert_config(store.root)
         result = TelegramNotifier(config).send(render_telegram(report))
         sent, send_error = result.ok, result.error
+        attempted_at = current.astimezone(timezone.utc).isoformat()
     report["delivery"] = {
-        "attempted": send,
+        "attempted": bool(send or prior_delivery.get("attempted")),
         "sent": sent,
         "error": send_error,
-        "attempted_at": current.astimezone(timezone.utc).isoformat() if send else None,
+        "attempted_at": attempted_at,
     }
     json_path = store.write_json(base.with_suffix(".json"), report)
     markdown_path = store.write_text(base.with_suffix(".md"), render_markdown(report))
@@ -1072,8 +1084,6 @@ def run_due_market_briefs(
             if path.is_file():
                 if send:
                     try:
-                        import json
-
                         prior = json.loads(path.read_text(encoding="utf-8"))
                         if not (prior.get("delivery") or {}).get("sent"):
                             result = TelegramNotifier(load_alert_config(store.root)).send(
