@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quant-workbench"
+version = "0.1.0"
+description = "A research-first multi-market quantitative analysis toolkit"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Quant Workbench Contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+api = ["fastapi>=0.115", "uvicorn>=0.30"]
+data = ["pandas>=2.2", "yfinance>=0.2.54", "akshare>=1.16", "baostock>=0.9.3"]
+ops = ["duckdb>=1.3", "exchange-calendars>=4.8", "pyarrow>=19.0", "tenacity>=9.0"]
+research = [
+  "vectorbt>=1.1,<2",
+  "lib-pybroker>=2.0,<3",
+  "skfolio>=1.2,<2",
+  "quantstats>=0.0.81,<0.1",
+]
+filings = ["edgartools>=5.58,<6"]
+options-research = ["QuantLib>=1.43,<2", "optopsy>=2.2,<3"]
+crypto = ["ccxt>=4.5,<5"]
+dev = ["pytest>=8.0", "ruff>=0.9"]
+
+[project.scripts]
+quant-workbench = "quant_workbench.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quant_workbench"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.quantworkbench.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/lucky/Library/Application Support/QuantWorkbench/venv/bin/quant-workbench</string>
+    <string>ops-backup</string>
+    <string>--root</string>
+    <string>/Users/lucky/Library/Application Support/QuantWorkbench/data</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/lucky/Library/Application Support/QuantWorkbench</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>2</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/lucky/Library/Application Support/QuantWorkbench/data/logs/backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/lucky/Library/Application Support/QuantWorkbench/data/logs/backup-error.log</string>
+</dict>
+</plist>

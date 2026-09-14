@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.quantworkbench.pipeline</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/lucky/Library/Application Support/QuantWorkbench/venv/bin/quant-workbench</string>
+    <string>run-due</string>
+    <string>--root</string>
+    <string>/Users/lucky/Library/Application Support/QuantWorkbench/data</string>
+    <string>--universe-directory</string>
+    <string>/Users/lucky/Library/Application Support/QuantWorkbench/config</string>
+    <string>--strict</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/lucky/Library/Application Support/QuantWorkbench</string>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/lucky/Library/Application Support/QuantWorkbench/data/logs/pipeline.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/lucky/Library/Application Support/QuantWorkbench/data/logs/pipeline-error.log</string>
+</dict>
+</plist>
