@@ -151,6 +151,7 @@ class ReportTests(unittest.TestCase):
                     datetime(2026, 9, 14, 16, 30, tzinfo=timezone.utc),
                     live_fetcher=lambda _: live,
                     send=False,
+                    generate_gpt=False,
                 )
                 report["delivery"] = {
                     "attempted": True,
@@ -169,6 +170,7 @@ class ReportTests(unittest.TestCase):
                     datetime(2026, 9, 14, 16, 32, tzinfo=timezone.utc),
                     live_fetcher=lambda _: live,
                     send=False,
+                    generate_gpt=False,
                 )
             self.assertEqual(len(report["sectors"]), 5)
             self.assertEqual(len(report["stocks"]), 15)
@@ -203,8 +205,12 @@ class ReportTests(unittest.TestCase):
                 patch("quant_workbench.reports.market_brief._load_daily_bars", return_value=frame),
                 patch("quant_workbench.reports.market_brief._option_pulse", return_value=[]),
             ):
-                first = run_due_market_briefs(store, now, fetch_live=False, send=False)
-                second = run_due_market_briefs(store, now, fetch_live=False, send=False)
+                first = run_due_market_briefs(
+                    store, now, fetch_live=False, send=False, generate_gpt=False
+                )
+                second = run_due_market_briefs(
+                    store, now, fetch_live=False, send=False, generate_gpt=False
+                )
             self.assertEqual(
                 [(item["market"], item["stage"]) for item in first["generated"]],
                 [("cn", "premarket")],

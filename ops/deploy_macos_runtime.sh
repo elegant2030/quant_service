@@ -55,6 +55,13 @@ if [[ ! -f "$RUNTIME_ROOT/config/alerts.env" ]]; then
   echo "note: $RUNTIME_ROOT/config/alerts.env not found; alerts stay disabled (see docs/ALERTING.md)"
 fi
 
+# GPT provider selection contains no credential.  Codex itself owns and refreshes its
+# ChatGPT login; this file only opts the report job into that already-authorized CLI.
+if [[ ! -f "$RUNTIME_ROOT/config/openai.env" ]]; then
+  install -m 600 "$PROJECT_ROOT/config/openai.env.example" \
+    "$RUNTIME_ROOT/config/openai.env"
+fi
+
 for label in pipeline watchdog backup reports fundamentals events; do
   install -m 644 "$PROJECT_ROOT/ops/launchd/com.quantworkbench.$label.plist" \
     "$AGENT_ROOT/com.quantworkbench.$label.plist"

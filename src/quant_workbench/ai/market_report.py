@@ -6,6 +6,9 @@ import hashlib
 import json
 import math
 import os
+import shutil
+import subprocess
+import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -14,6 +17,7 @@ from urllib.request import Request, urlopen
 
 PROMPT_VERSION = "market_report_v1"
 DEFAULT_MODEL = "gpt-5-mini"
+DEFAULT_PROVIDER = "auto"
 
 SYSTEM_PROMPT = """你是机构级量化研究报告撰写助手。
 用户提供的 JSON 是已经由确定性程序计算的研究材料。
@@ -231,6 +235,11 @@ def load_openai_report_config(data_root: Path) -> dict[str, str]:
     file_values = _read_env_file(data_root.parent / "config" / "openai.env")
     return {
         "api_key": os.environ.get("OPENAI_API_KEY") or file_values.get("OPENAI_API_KEY", ""),
+        "provider": (
+            os.environ.get("QW_GPT_PROVIDER")
+            or file_values.get("QW_GPT_PROVIDER")
+            or DEFAULT_PROVIDER
+        ).lower(),
         "model": (
             os.environ.get("OPENAI_REPORT_MODEL")
             or file_values.get("OPENAI_REPORT_MODEL")
@@ -238,7 +247,53 @@ def load_openai_report_config(data_root: Path) -> dict[str, str]:
             or file_values.get("OPENAI_MODEL")
             or DEFAULT_MODEL
         ),
+        "codex_bin": (
+            os.environ.get("QW_CODEX_BIN")
+            or file_values.get("QW_CODEX_BIN")
+            or ""
+        ),
+        "codex_model": (
+            os.environ.get("QW_CODEX_MODEL")
+            or file_values.get("QW_CODEX_MODEL")
+            or ""
+        ),
     }
+
+
+def _validate_analysis_identity(material: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """Reject a model response that changes deterministic candidates or their order."""
+    sector_reports = analysis.get("sector_reports")
+    stock_reports = analysis.get("stock_reports")
+    if not isinstance(sector_reports, list) or len(sector_reports) != 5:
+        raise ValueError("GPT output must contain exactly 5 sector reports")
+    if not isinstance(stock_reports, list) or len(stock_reports) != 15:
+        raise ValueError("GPT output must contain exactly 15 stock reports")
+    expected_sectors = [str(item.get("sector")) for item in material.get("sectors") or []]
+    actual_sectors = [str(item.get("sector")) for item in sector_reports]
+    if expected_sectors and actual_sectors != expected_sectors:
+        raise ValueError("GPT output changed the deterministic sector ranking")
+    expected_stocks = [str(item.get("symbol")) for item in material.get("stocks") or []]
+    actual_stocks = [str(item.get("symbol")) for item in stock_reports]
+    if expected_stocks and actual_stocks != expected_stocks:
+        raise ValueError("GPT output changed the deterministic stock ranking")
+
+
+def _codex_metadata(stdout: str) -> tuple[str | None, dict[str, Any]]:
+    session_id: str | None = None
+    usage: dict[str, Any] = {}
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("type") == "thread.started":
+            session_id = str(event.get("thread_id") or "") or None
+        if isinstance(event.get("usage"), dict):
+            usage = _json_safe(event["usage"])
+        item = event.get("item")
+        if isinstance(item, dict) and isinstance(item.get("usage"), dict):
+            usage = _json_safe(item["usage"])
+    return session_id, usage
 
 
 class MarketReportGPTClient:
@@ -285,8 +340,10 @@ class MarketReportGPTClient:
         }
         body = self._post_override(payload) if self._post_override else self._post(payload)
         analysis = json.loads(self._output_text(body))
+        _validate_analysis_identity(material, analysis)
         return {
             "status": "completed",
+            "provider": "openai_api",
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "model": self.model,
             "prompt_version": PROMPT_VERSION,
@@ -323,36 +380,184 @@ class MarketReportGPTClient:
         raise RuntimeError("OpenAI response contained no output_text")
 
 
+class CodexCLIReportClient:
+    """Use the local Codex CLI's existing ChatGPT login without copying credentials."""
+
+    def __init__(
+        self,
+        codex_bin: str,
+        model: str | None = None,
+        timeout_seconds: int = 900,
+        runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    ):
+        self.codex_bin = codex_bin
+        self.model = model or "chatgpt_account_default"
+        self.timeout_seconds = timeout_seconds
+        self._runner = runner or subprocess.run
+
+    def analyze(self, material: dict[str, Any]) -> dict[str, Any]:
+        input_hash = material_sha256(material)
+        prompt = "\n\n".join(
+            [
+                SYSTEM_PROMPT,
+                "不要使用工具、不要读取本地文件或网络；只分析下方 <materials> 内的 JSON。",
+                "任务：解释确定性排名，生成板块与股票完整研究报告。",
+                f"material_sha256: {input_hash}",
+                "<materials>\n"
+                + json.dumps(material, ensure_ascii=False, allow_nan=False)
+                + "\n</materials>",
+            ]
+        )
+        with tempfile.TemporaryDirectory(prefix="qw-codex-report-") as directory:
+            workdir = Path(directory)
+            schema_path = workdir / "schema.json"
+            output_path = workdir / "answer.json"
+            schema_path.write_text(
+                json.dumps(MARKET_REPORT_JSON_SCHEMA, ensure_ascii=False), encoding="utf-8"
+            )
+            command = [
+                self.codex_bin,
+                "exec",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "--cd",
+                str(workdir),
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output_path),
+                "--color",
+                "never",
+                "--json",
+            ]
+            if self.model != "chatgpt_account_default":
+                command.extend(["--model", self.model])
+            command.append("-")
+            result = self._runner(
+                command,
+                input=prompt,
+                text=True,
+                capture_output=True,
+                timeout=self.timeout_seconds,
+                check=False,
+                env={**os.environ, "NO_COLOR": "1"},
+            )
+            if result.returncode != 0:
+                error = (result.stderr or result.stdout or "unknown Codex CLI error")[-1200:]
+                raise RuntimeError(f"Codex CLI exited {result.returncode}: {error.strip()}")
+            if not output_path.is_file():
+                raise RuntimeError("Codex CLI produced no final output file")
+            analysis = json.loads(output_path.read_text(encoding="utf-8"))
+            session_id, usage = _codex_metadata(result.stdout)
+        _validate_analysis_identity(material, analysis)
+        return {
+            "status": "completed",
+            "provider": "codex_cli_chatgpt",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "model": self.model,
+            "prompt_version": PROMPT_VERSION,
+            "material_sha256": input_hash,
+            "response_id": session_id,
+            "usage": usage,
+            "cost_usd": None,
+            "analysis": analysis,
+        }
+
+
+def _resolve_codex_bin(configured: str) -> str | None:
+    if configured:
+        path = Path(configured).expanduser()
+        return str(path) if path.is_file() else None
+    discovered = shutil.which("codex")
+    if discovered:
+        return discovered
+    candidate = Path.home() / ".local" / "bin" / "codex"
+    return str(candidate) if candidate.is_file() else None
+
+
 def generate_gpt_analysis(
     report: dict[str, Any],
     data_root: Path,
     *,
     model: str | None = None,
-    client: MarketReportGPTClient | None = None,
+    client: MarketReportGPTClient | CodexCLIReportClient | None = None,
 ) -> dict[str, Any]:
     material = build_material_pack(report)
     input_hash = material_sha256(material)
     if client is not None:
         return client.analyze(material)
     config = load_openai_report_config(data_root)
-    if not config["api_key"]:
+    provider = config["provider"]
+    if provider not in {"auto", "openai_api", "codex_cli", "disabled"}:
+        provider = "invalid"
+    codex_bin = _resolve_codex_bin(config["codex_bin"])
+    selected = provider
+    if provider == "auto":
+        selected = "openai_api" if config["api_key"] else "codex_cli"
+    if selected == "disabled":
         return {
             "status": "disabled",
+            "provider": "disabled",
+            "reason": "QW_GPT_PROVIDER=disabled; GPT was not called",
+            "model": None,
+            "prompt_version": PROMPT_VERSION,
+            "material_sha256": input_hash,
+            "analysis": None,
+        }
+    if selected == "invalid":
+        return {
+            "status": "disabled",
+            "provider": provider,
+            "reason": f"unsupported QW_GPT_PROVIDER={config['provider']}; GPT was not called",
+            "model": None,
+            "prompt_version": PROMPT_VERSION,
+            "material_sha256": input_hash,
+            "analysis": None,
+        }
+    if selected == "openai_api" and not config["api_key"]:
+        return {
+            "status": "disabled",
+            "provider": "openai_api",
             "reason": "OPENAI_API_KEY not configured; GPT was not called",
             "model": model or config["model"],
             "prompt_version": PROMPT_VERSION,
             "material_sha256": input_hash,
             "analysis": None,
         }
+    if selected == "codex_cli" and not codex_bin:
+        return {
+            "status": "disabled",
+            "provider": "codex_cli_chatgpt",
+            "reason": "Codex CLI executable not found; GPT was not called",
+            "model": model or config["codex_model"] or "chatgpt_account_default",
+            "prompt_version": PROMPT_VERSION,
+            "material_sha256": input_hash,
+            "analysis": None,
+        }
     try:
-        return MarketReportGPTClient(
-            config["api_key"], model=model or config["model"]
+        if selected == "openai_api":
+            return MarketReportGPTClient(
+                config["api_key"], model=model or config["model"]
+            ).analyze(material)
+        return CodexCLIReportClient(
+            codex_bin or "codex", model=model or config["codex_model"] or None
         ).analyze(material)
     except Exception as exc:
         return {
             "status": "failed",
+            "provider": (
+                "openai_api" if selected == "openai_api" else "codex_cli_chatgpt"
+            ),
             "reason": f"{type(exc).__name__}: {exc}",
-            "model": model or config["model"],
+            "model": (
+                model or config["model"]
+                if selected == "openai_api"
+                else model or config["codex_model"] or "chatgpt_account_default"
+            ),
             "prompt_version": PROMPT_VERSION,
             "material_sha256": input_hash,
             "analysis": None,
@@ -364,7 +569,8 @@ def render_gpt_markdown(envelope: dict[str, Any], report: dict[str, Any]) -> str
     lines = [
         f"# GPT 深度解读：{report['market_name']}{report['stage_name']}",
         "",
-        f"状态：{status}；模型：{envelope.get('model')}；提示词：{envelope.get('prompt_version')}",
+        f"状态：{status}；通道：{envelope.get('provider')}；模型：{envelope.get('model')}；"
+        f"提示词：{envelope.get('prompt_version')}",
         f"证据包 SHA-256：`{envelope.get('material_sha256')}`",
         "",
     ]

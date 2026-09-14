@@ -13,7 +13,13 @@ Quant Workbench 会先用确定性程序完成市场内排名，再把 TOP 5 板
 
 ## 本地配置
 
-ChatGPT/Codex 订阅不会自动成为 OpenAI API 凭证。请在运行服务的电脑上创建：
+本机默认使用已经登录 ChatGPT 的 Codex CLI，不读取或复制登录令牌。运行：
+
+```bash
+codex login status
+```
+
+应看到 `Logged in using ChatGPT`。运行时配置文件位于：
 
 ```text
 /Users/lucky/Library/Application Support/QuantWorkbench/config/openai.env
@@ -22,6 +28,17 @@ ChatGPT/Codex 订阅不会自动成为 OpenAI API 凭证。请在运行服务的
 内容如下：
 
 ```dotenv
+QW_GPT_PROVIDER=codex_cli
+QW_CODEX_BIN=/Users/lucky/.local/bin/codex
+QW_CODEX_MODEL=
+```
+
+Codex CLI 使用临时会话、只读沙箱和独立空目录，且禁用项目规则读取。它消耗 ChatGPT/Codex 账号额度，不复用当前聊天窗口的上下文。登录失效、额度不足或调用失败时，确定性报告照常生成。
+
+如需切换到独立计费、配额更可控的 OpenAI API，可改成：
+
+```dotenv
+QW_GPT_PROVIDER=openai_api
 OPENAI_API_KEY=你的_API_Key
 OPENAI_REPORT_MODEL=gpt-5-mini
 ```

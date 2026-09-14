@@ -823,7 +823,13 @@ def render_telegram(report: dict[str, Any]) -> str:
     gpt = report.get("gpt_analysis") or {}
     analysis = gpt.get("analysis") or {}
     if gpt.get("status") == "completed" and analysis:
-        lines.extend(["", f"GPT解读({gpt.get('model')}): {analysis['executive_summary']}"])
+        lines.extend(
+            [
+                "",
+                f"GPT解读({gpt.get('provider')}/{gpt.get('model')}): "
+                f"{analysis['executive_summary']}",
+            ]
+        )
         priorities = [
             f"{item['symbol']}({item['research_priority']})"
             for item in analysis.get("stock_reports", [])
@@ -977,6 +983,7 @@ def build_market_brief(
     else:
         report["gpt_analysis"] = {
             "status": "disabled",
+            "provider": "disabled_by_command",
             "reason": "disabled by command; GPT was not called",
             "model": gpt_model,
             "prompt_version": None,
@@ -987,6 +994,7 @@ def build_market_brief(
         "role": "interpretation_only",
         "ranking_and_scores": "deterministic",
         "status": report["gpt_analysis"]["status"],
+        "provider": report["gpt_analysis"].get("provider"),
         "model": report["gpt_analysis"].get("model"),
         "prompt_version": report["gpt_analysis"].get("prompt_version"),
         "material_sha256": report["gpt_analysis"].get("material_sha256"),

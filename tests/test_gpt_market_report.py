@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ import pandas as pd
 
 from quant_workbench.ai.market_report import (
     MARKET_REPORT_JSON_SCHEMA,
+    CodexCLIReportClient,
     MarketReportGPTClient,
     build_material_pack,
     generate_gpt_analysis,
@@ -73,6 +75,19 @@ def completed_analysis() -> dict[str, object]:
     }
 
 
+def fixture_material() -> dict[str, object]:
+    analysis = completed_analysis()
+    return {
+        "market": "cn",
+        "sectors": [
+            {"sector": item["sector"]} for item in analysis["sector_reports"]  # type: ignore[index]
+        ],
+        "stocks": [
+            {"symbol": item["symbol"]} for item in analysis["stock_reports"]  # type: ignore[index]
+        ],
+    }
+
+
 class GPTMarketReportTests(unittest.TestCase):
     def test_material_is_strict_json_and_hash_is_stable(self) -> None:
         report = {
@@ -122,8 +137,15 @@ class GPTMarketReportTests(unittest.TestCase):
 
     def test_missing_key_is_explicit_and_never_calls_gpt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config"
+            config.mkdir()
+            (config / "openai.env").write_text(
+                "QW_GPT_PROVIDER=openai_api\n", encoding="utf-8"
+            )
             with patch.dict(os.environ, {}, clear=True):
-                result = generate_gpt_analysis({"market": "cn"}, Path(directory))
+                result = generate_gpt_analysis(
+                    {"market": "cn"}, Path(directory) / "data"
+                )
         self.assertEqual(result["status"], "disabled")
         self.assertIn("not configured", result["reason"])
         self.assertIsNone(result["analysis"])
@@ -134,12 +156,22 @@ class GPTMarketReportTests(unittest.TestCase):
             config = Path(directory) / "config"
             config.mkdir()
             (config / "openai.env").write_text(
+                "QW_GPT_PROVIDER=openai_api\n"
                 "OPENAI_API_KEY=file-key\nOPENAI_REPORT_MODEL=gpt-fixture\n",
                 encoding="utf-8",
             )
             with patch.dict(os.environ, {}, clear=True):
                 loaded = load_openai_report_config(data_root)
-        self.assertEqual(loaded, {"api_key": "file-key", "model": "gpt-fixture"})
+        self.assertEqual(
+            loaded,
+            {
+                "api_key": "file-key",
+                "provider": "openai_api",
+                "model": "gpt-fixture",
+                "codex_bin": "",
+                "codex_model": "",
+            },
+        )
         envelope = {
             "status": "completed",
             "model": "gpt-fixture",
@@ -154,6 +186,37 @@ class GPTMarketReportTests(unittest.TestCase):
         self.assertIn("板块完整解读", markdown)
         self.assertIn("股票完整解读", markdown)
         self.assertIn("S15", markdown)
+
+    def test_codex_cli_uses_ephemeral_read_only_structured_run(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            captured["command"] = command
+            captured.update(kwargs)
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text(
+                json.dumps(completed_analysis(), ensure_ascii=False), encoding="utf-8"
+            )
+            stdout = json.dumps(
+                {
+                    "type": "thread.started",
+                    "thread_id": "thread_fixture",
+                    "usage": {"input_tokens": 10, "output_tokens": 20},
+                }
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        result = CodexCLIReportClient(
+            "/fixture/codex", runner=fake_runner
+        ).analyze(fixture_material())
+        command = captured["command"]
+        self.assertIn("--ephemeral", command)
+        self.assertIn("--ignore-user-config", command)
+        self.assertIn("read-only", command)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["provider"], "codex_cli_chatgpt")
+        self.assertEqual(result["response_id"], "thread_fixture")
+        self.assertEqual(result["usage"]["input_tokens"], 10)
 
 
 if __name__ == "__main__":
