@@ -11,6 +11,7 @@ from typing import Any
 import duckdb
 import pandas as pd
 
+from quant_workbench.data.adjust import apply_adjustment
 from quant_workbench.derivatives.options import OptionType, black_scholes
 
 LAKE = Path("data/lake")
@@ -35,9 +36,10 @@ def load_bars() -> pd.DataFrame:
     pattern = str(LAKE / "canonical" / "dataset=daily_bars" / "**" / "*.parquet")
     connection = duckdb.connect()
     try:
-        return connection.execute(
+        frame = connection.execute(
             """
-            SELECT market, symbol, name, sector, session_date, close, volume
+            SELECT market, symbol, name, sector, session_date, close, volume, adj_factor,
+                   schema_version
             FROM read_parquet(?, union_by_name=true)
             ORDER BY market, symbol, session_date
             """,
@@ -45,6 +47,13 @@ def load_bars() -> pd.DataFrame:
         ).df()
     finally:
         connection.close()
+    # Canonical bars are raw (schema 2); analysis uses forward-adjusted prices so the
+    # series ends at the live quote. Legacy schema-1 rows are already adjusted.
+    frame = apply_adjustment(frame, mode="forward")
+    frame["close_raw"] = frame["close"]
+    frame["close"] = frame["close_adj"]
+    frame["volume"] = frame["volume_adj"]
+    return frame
 
 
 def max_drawdown(values: pd.Series) -> float:

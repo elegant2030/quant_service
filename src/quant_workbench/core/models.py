@@ -62,6 +62,12 @@ class Bar:
     close: Decimal
     volume: Decimal = Decimal("0")
     previous_close: Decimal | None = None
+    # Corporate-action facts for the session (raw bars only). ``adj_factor`` is the
+    # single-event back-adjustment factor for this session (1 when nothing happened);
+    # cumulative adjustment is computed at read time, see ``data/adjust.py``.
+    dividend: Decimal | None = None
+    split_ratio: Decimal | None = None
+    adj_factor: Decimal | None = None
 
     def __post_init__(self) -> None:
         if min(self.open, self.high, self.low, self.close) <= 0:

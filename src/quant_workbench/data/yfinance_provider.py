@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from decimal import Decimal
 from math import isnan
-import re
 from typing import Any
 
 from quant_workbench.core.models import Bar, FinancialSnapshot, Instrument
+from quant_workbench.data.adjust import event_factor
 from quant_workbench.data.universe import (
     US_SECTORS,
     UniverseBuildResult,
@@ -93,42 +94,18 @@ class YFinanceProvider:
         frequency: str = "1d",
         adjusted: bool = False,
     ) -> list[Bar]:
+        """Daily bars. ``adjusted=False`` (default) returns true raw prices plus
+        dividend / split facts; ``adjusted=True`` returns Yahoo's adjusted series for
+        ad-hoc research only and must never be written to canonical storage."""
         frame = self.yf.Ticker(instrument.symbol).history(
             start=start.date().isoformat(),
             end=(end.date() + timedelta(days=1)).isoformat(),
             interval=frequency,
             auto_adjust=adjusted,
-            actions=False,
+            actions=True,
             repair=False,
         )
-        result: list[Bar] = []
-        previous_close: Decimal | None = None
-        for index, row in frame.iterrows():
-            timestamp = index.to_pydatetime()
-            if timestamp.tzinfo is not None:
-                timestamp = timestamp.replace(tzinfo=None)
-            close = _decimal(row.get("Close"))
-            open_ = _decimal(row.get("Open"))
-            high = _decimal(row.get("High"))
-            low = _decimal(row.get("Low"))
-            if None in (open_, high, low, close):
-                continue
-            if low > min(open_, close) or high < max(open_, close):
-                continue
-            result.append(
-                Bar(
-                    instrument=instrument,
-                    timestamp=timestamp,
-                    open=open_,
-                    high=high,
-                    low=low,
-                    close=close,
-                    volume=_decimal(row.get("Volume")) or Decimal("0"),
-                    previous_close=previous_close,
-                )
-            )
-            previous_close = close
-        return result
+        return self._frame_to_bars(instrument, frame, raw=not adjusted)
 
     def bars_many(
         self,
@@ -152,7 +129,7 @@ class YFinanceProvider:
                     end=(end.date() + timedelta(days=1)).isoformat(),
                     interval=frequency,
                     auto_adjust=adjusted,
-                    actions=False,
+                    actions=True,
                     repair=False,
                     progress=False,
                     group_by="ticker",
@@ -167,7 +144,9 @@ class YFinanceProvider:
                             part = frame[symbol]
                         else:
                             part = frame.xs(symbol, axis=1, level=1)
-                        results[symbol] = self._frame_to_bars(by_symbol[symbol], part)
+                        results[symbol] = self._frame_to_bars(
+                            by_symbol[symbol], part, raw=not adjusted
+                        )
                     except Exception as exc:
                         errors.append(f"{symbol}: {type(exc).__name__}: {exc}")
             except Exception as exc:
@@ -175,31 +154,80 @@ class YFinanceProvider:
         return results, errors
 
     @staticmethod
-    def _frame_to_bars(instrument: Instrument, frame: Any) -> list[Bar]:
-        result: list[Bar] = []
-        previous_close: Decimal | None = None
+    def _frame_to_bars(instrument: Instrument, frame: Any, raw: bool = True) -> list[Bar]:
+        """Convert a yfinance history frame into bars.
+
+        Yahoo's ``Close`` is split-adjusted (retroactively divided by later splits) but
+        not dividend-adjusted. With ``raw=True`` the split adjustment is undone so the
+        stored price is exactly what traded that day and never changes when a future
+        split happens; ``split_ratio`` / ``dividend`` are recorded on the ex-date row
+        and ``adj_factor`` is the single-session back-adjustment factor.
+        """
+        records: list[dict[str, Any]] = []
         for index, row in frame.iterrows():
             timestamp = index.to_pydatetime()
             if timestamp.tzinfo is not None:
                 timestamp = timestamp.replace(tzinfo=None)
-            close = _decimal(row.get("Close"))
-            open_ = _decimal(row.get("Open"))
-            high = _decimal(row.get("High"))
-            low = _decimal(row.get("Low"))
-            if None in (open_, high, low, close):
+            values = {name: _decimal(row.get(name)) for name in ("Open", "High", "Low", "Close")}
+            if None in values.values():
                 continue
+            split = _decimal(row.get("Stock Splits"))
+            dividend = _decimal(row.get("Dividends"))
+            records.append(
+                {
+                    "timestamp": timestamp,
+                    "open": values["Open"],
+                    "high": values["High"],
+                    "low": values["Low"],
+                    "close": values["Close"],
+                    "volume": _decimal(row.get("Volume")) or Decimal("0"),
+                    "split": split if split and split > 0 else None,
+                    "dividend": dividend if dividend and dividend > 0 else None,
+                }
+            )
+        records.sort(key=lambda item: item["timestamp"])
+        if raw:
+            # Undo Yahoo's retroactive split adjustment: prices AND dividend amounts are
+            # expressed in post-split share terms, so multiply both (and divide volume)
+            # by every split that happened strictly after the session.
+            later_splits = Decimal("1")
+            for record in reversed(records):
+                if later_splits != 1:
+                    for name in ("open", "high", "low", "close"):
+                        record[name] = record[name] * later_splits
+                    record["volume"] = record["volume"] / later_splits
+                    if record["dividend"]:
+                        record["dividend"] = record["dividend"] * later_splits
+                if record["split"]:
+                    later_splits *= record["split"]
+        result: list[Bar] = []
+        previous_close: Decimal | None = None
+        for record in records:
+            open_, high, low, close = (record[name] for name in ("open", "high", "low", "close"))
             if low > min(open_, close) or high < max(open_, close):
+                previous_close = close
                 continue
+            adj_factor: Decimal | None = None
+            if raw:
+                try:
+                    adj_factor = event_factor(previous_close, record["dividend"], record["split"])
+                except ValueError:
+                    # Dividend on the first row of a window: the caller must fetch a
+                    # warm-up period; flag by leaving adj_factor unset.
+                    adj_factor = None
             result.append(
                 Bar(
                     instrument=instrument,
-                    timestamp=timestamp,
+                    timestamp=record["timestamp"],
                     open=open_,
                     high=high,
                     low=low,
                     close=close,
-                    volume=_decimal(row.get("Volume")) or Decimal("0"),
+                    volume=record["volume"],
                     previous_close=previous_close,
+                    dividend=record["dividend"] if raw else None,
+                    split_ratio=record["split"] if raw else None,
+                    adj_factor=adj_factor,
                 )
             )
             previous_close = close

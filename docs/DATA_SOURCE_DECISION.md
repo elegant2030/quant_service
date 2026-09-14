@@ -63,3 +63,25 @@
 3. 财务数据同时保存报告期、首次披露时间、抓取时间和原始响应哈希。
 4. 原始数据只追加不覆盖；标准化结果可以从原始快照重建。
 5. 任何 AI 财报解读只能引用已保存的原文和数据快照。
+
+## 日线数据字典（schema_version 2，2026-09-13 起）
+
+canonical `dataset=daily_bars` 从 schema 2 开始只存**原始成交价 + 单次复权因子**，复权在读取时用 `quant_workbench.data.adjust.apply_adjustment` 计算。原因：yfinance 和 BaoStock 的"已复权价"会在每次分红、拆股后整体回溯变化，存复权价会让同一 `(symbol, session_date)` 的值随时间漂移，回测不可复现。
+
+| 列 | 含义 |
+|---|---|
+| `open/high/low/close/volume` | 当日实际成交的原始价和原始成交量。yfinance 的 `Close` 本身已按后续拆股回溯除过，写入前按 `Stock Splits` 乘回去还原成真实成交价；BaoStock 用 `adjustflag=3` 不复权。 |
+| `previous_close` | 前一交易日原始收盘价（yfinance 由前一行得到，增量拉取带 7 天预热窗口；BaoStock 用 `preclose`）。 |
+| `dividend` | 当日除息的每股现金分红（yfinance `Dividends`；BaoStock 暂不单独落地，留空）。 |
+| `split_ratio` | 当日生效的拆股比例，2 = 一拆二，0.1 = 十合一（yfinance `Stock Splits`；BaoStock 留空，已含在 `adj_factor` 中）。 |
+| `adj_factor` | **单次事件**的后复权因子，无事件为 1。yfinance：`split_ratio × previous_close / (previous_close − dividend)`；BaoStock：`backAdjustFactor` 相对上一事件的比值。 |
+| `adjustment` | 固定 `raw`。schema 1 的历史导入行为 `provider_adjusted`，已在 backfill 时归档到 `archive/<日期>/`。 |
+| `schema_version` | 2。 |
+
+读取约定：
+
+- 后复权（`mode="back"`）：`price × cumprod(adj_factor)`，历史值稳定，适合落库的研究结果。
+- 前复权（`mode="forward"`）：后复权价除以该证券最新的累计因子，序列末端等于当前实际报价，适合与实时行情对照。
+- 两种口径的收益率完全一致。`schema_version=1` 的旧行没有因子，按 1 处理并在 `adjustment_applied=False` 标出。
+
+验收（CLAUDE.md T1）：同一 `(symbol, session_date)` 重跑两次 `close` 不变；`backfill-daily` 输出 `comparison`，给出新前复权价与旧复权价的差异分布，用来解释回测结果变化。已知限制：yfinance 若事后修正历史成交价（数据修复而非公司行动），原始价仍会变化，这属于来源数据质量问题，由校验"与已入库同键值对比"拦截（待实现）。

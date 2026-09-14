@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import os
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -12,7 +13,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from quant_workbench.core.models import AssetClass, Bar, Currency, Exchange, Instrument
 from quant_workbench.data.baostock_provider import BaoStockProvider
-from quant_workbench.data.validation import validate_bar_row, validate_option_row
+from quant_workbench.data.validation import (
+    BAR_SCHEMA_VERSION,
+    RAW_ADJUSTMENT,
+    validate_bar_row,
+    validate_option_row,
+)
 from quant_workbench.data.yfinance_provider import YFinanceProvider
 from quant_workbench.ops.calendar import latest_session
 from quant_workbench.ops.lock import ProcessLock
@@ -72,8 +78,11 @@ def _bar_row(bar: Bar, market: str, source: str, retrieved_at: str) -> dict[str,
         "close": float(bar.close),
         "volume": float(bar.volume),
         "previous_close": float(bar.previous_close) if bar.previous_close is not None else None,
-        "adjustment": "provider_adjusted",
-        "schema_version": 1,
+        "dividend": float(bar.dividend) if bar.dividend is not None else None,
+        "split_ratio": float(bar.split_ratio) if bar.split_ratio is not None else None,
+        "adj_factor": float(bar.adj_factor) if bar.adj_factor is not None else None,
+        "adjustment": RAW_ADJUSTMENT,
+        "schema_version": BAR_SCHEMA_VERSION,
     }
 
 
@@ -155,6 +164,9 @@ def ingest_cached_bars(
         raise
 
 
+US_WARMUP_DAYS = 7  # calendar days fetched before ``start`` so previous_close is known
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
 def _fetch_cn_bars(
     provider: BaoStockProvider, instrument: Instrument, start: date, end: date
@@ -163,7 +175,7 @@ def _fetch_cn_bars(
         instrument,
         datetime.combine(start, datetime.min.time()),
         datetime.combine(end, datetime.max.time()),
-        adjusted=True,
+        adjusted=False,
     )
 
 
@@ -174,11 +186,12 @@ def _fetch_us_bars(
     start: date,
     end: date,
 ) -> tuple[dict[str, list[Bar]], list[str]]:
+    """Raw bars from ``start - US_WARMUP_DAYS``; callers trim to ``start``."""
     return provider.bars_many(
         instruments,
-        datetime.combine(start, datetime.min.time()),
+        datetime.combine(start - timedelta(days=US_WARMUP_DAYS), datetime.min.time()),
         datetime.combine(end, datetime.max.time()),
-        adjusted=True,
+        adjusted=False,
     )
 
 
@@ -244,36 +257,11 @@ def ingest_incremental_bars(
         bars_by_symbol: dict[str, list[Bar]] = {}
         successful_symbols: set[str] = set()
         errors: list[str] = []
-        if market == "us":
-            provider = YFinanceProvider()
-            for start, group in grouped.items():
-                batches, batch_errors = _fetch_us_bars(provider, group, start, target)
-                failed = {message.split(":", 1)[0] for message in batch_errors}
-                errors.extend(batch_errors)
-                for instrument in group:
-                    if instrument.symbol in batches and instrument.symbol not in failed:
-                        successful_symbols.add(instrument.symbol)
-                        bars_by_symbol[instrument.symbol] = [
-                            bar
-                            for bar in batches[instrument.symbol]
-                            if start <= bar.timestamp.date() <= target
-                        ]
-                    elif instrument.symbol not in failed:
-                        errors.append(f"{instrument.symbol}: missing provider result")
-        else:
-            provider = BaoStockProvider()
-            try:
-                for start, group in grouped.items():
-                    for instrument in group:
-                        try:
-                            bars_by_symbol[instrument.symbol] = _fetch_cn_bars(
-                                provider, instrument, start, target
-                            )
-                            successful_symbols.add(instrument.symbol)
-                        except Exception as exc:
-                            errors.append(f"{instrument.symbol}: {type(exc).__name__}: {exc}")
-            finally:
-                provider.close()
+        for start, group in grouped.items():
+            fetched, successful, group_errors = _fetch_market_bars(market, group, start, target)
+            bars_by_symbol.update(fetched)
+            successful_symbols.update(successful)
+            errors.extend(group_errors)
 
         pending_count = sum(len(group) for group in grouped.values())
         coverage = len(successful_symbols) / pending_count if pending_count else 1.0
@@ -332,6 +320,234 @@ def ingest_incremental_bars(
                 "errors": errors,
             },
         )
+    except Exception as exc:
+        state.record_source_failure(source, f"{type(exc).__name__}: {exc}")
+        state.fail_job(lease.run_id, f"{type(exc).__name__}: {exc}")
+        raise
+
+
+def _fetch_market_bars(
+    market: str,
+    instruments: list[Instrument],
+    start: date,
+    end: date,
+    provider: Any | None = None,
+) -> tuple[dict[str, list[Bar]], set[str], list[str]]:
+    """Fetch raw bars for every instrument in ``[start, end]``.
+
+    Returns bars per symbol, the set of symbols the provider answered for, and errors.
+    ``provider`` may be injected for tests; otherwise the market's default provider.
+    """
+    bars_by_symbol: dict[str, list[Bar]] = {}
+    successful: set[str] = set()
+    errors: list[str] = []
+    if market == "us":
+        client = provider or YFinanceProvider()
+        batches, batch_errors = _fetch_us_bars(client, instruments, start, end)
+        failed = {message.split(":", 1)[0] for message in batch_errors}
+        errors.extend(batch_errors)
+        for instrument in instruments:
+            if instrument.symbol in batches and instrument.symbol not in failed:
+                successful.add(instrument.symbol)
+                bars_by_symbol[instrument.symbol] = [
+                    bar
+                    for bar in batches[instrument.symbol]
+                    if start <= bar.timestamp.date() <= end
+                ]
+            elif instrument.symbol not in failed:
+                errors.append(f"{instrument.symbol}: missing provider result")
+    else:
+        client = provider or BaoStockProvider()
+        try:
+            for instrument in instruments:
+                try:
+                    bars_by_symbol[instrument.symbol] = _fetch_cn_bars(
+                        client, instrument, start, end
+                    )
+                    successful.add(instrument.symbol)
+                except Exception as exc:
+                    errors.append(f"{instrument.symbol}: {type(exc).__name__}: {exc}")
+        finally:
+            if provider is None:
+                client.close()
+    return bars_by_symbol, successful, errors
+
+
+def _daily_bar_parts(store: DatasetStore, market: str) -> list[Path]:
+    partition = store.root / "canonical" / "dataset=daily_bars" / f"market={market}"
+    return sorted(partition.rglob("*.parquet"))
+
+
+def _compare_with_existing(
+    store: DatasetStore, market: str, rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Explain the backfill: forward-adjusted new closes vs. previously stored closes."""
+    parts = _daily_bar_parts(store, market)
+    if not parts or not rows:
+        return {"compared_rows": 0, "note": "no existing rows"}
+    try:
+        import duckdb
+        import pandas as pd
+
+        from quant_workbench.data.adjust import apply_adjustment
+    except ImportError:
+        return {"compared_rows": 0, "note": "duckdb/pandas unavailable"}
+    new = pd.DataFrame(rows)[["symbol", "session_date", "close", "adj_factor"]]
+    new = apply_adjustment(new, mode="forward")
+    connection = duckdb.connect()
+    try:
+        old = connection.execute(
+            """
+            SELECT symbol, session_date, close AS old_close,
+                   COALESCE(adjustment, '') AS old_adjustment
+            FROM read_parquet(?, union_by_name=true)
+            """,
+            [[str(path) for path in parts]],
+        ).df()
+    finally:
+        connection.close()
+    merged = new.merge(old, on=["symbol", "session_date"], how="inner")
+    if merged.empty:
+        return {"compared_rows": 0, "note": "no overlapping (symbol, session_date)"}
+    rel = ((merged["close_adj"] - merged["old_close"]) / merged["old_close"]).abs()
+    raw_rel = ((merged["close"] - merged["old_close"]) / merged["old_close"]).abs()
+    worst = merged.assign(rel=rel).sort_values("rel", ascending=False).head(5)
+    return {
+        "compared_rows": int(len(merged)),
+        "old_adjustment_values": sorted(merged["old_adjustment"].unique().tolist()),
+        "forward_adjusted_vs_old": {
+            "median_abs_rel_diff": float(rel.median()),
+            "p99_abs_rel_diff": float(rel.quantile(0.99)),
+            "max_abs_rel_diff": float(rel.max()),
+            "rows_over_1pct": int((rel > 0.01).sum()),
+        },
+        "raw_vs_old": {
+            "median_abs_rel_diff": float(raw_rel.median()),
+            "max_abs_rel_diff": float(raw_rel.max()),
+        },
+        "worst": [
+            {
+                "symbol": r.symbol,
+                "session_date": str(r.session_date),
+                "old": float(r.old_close),
+                "new_adj": float(r.close_adj),
+                "new_raw": float(r.close),
+            }
+            for r in worst.itertuples()
+        ],
+    }
+
+
+def _archive_parts(store: DatasetStore, parts: list[Path], run_date: date) -> list[str]:
+    """Move superseded canonical parts (and manifests) under ``archive/``; never delete."""
+    archived: list[str] = []
+    for path in parts:
+        for file in (path, path.with_suffix(".manifest.json")):
+            if not file.exists():
+                continue
+            relative = file.relative_to(store.root)
+            target = store.root / "archive" / run_date.isoformat() / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(file, target)
+            archived.append(str(relative))
+    return archived
+
+
+def backfill_daily_bars(
+    store: DatasetStore,
+    state: StateStore,
+    market: str,
+    universe_path: Path,
+    start: date,
+    run_date: date,
+    end: date | None = None,
+    minimum_coverage: float = 0.98,
+    provider: Any | None = None,
+    force: bool = False,
+) -> tuple[JobLease, WriteResult | None, dict[str, Any]]:
+    """Re-fetch the full raw history and replace provider-adjusted (schema 1) parts.
+
+    Existing parts are moved to ``archive/<run_date>/`` after the new part is written,
+    so nothing is deleted. Watermarks are untouched: the target session is the
+    current global watermark (or the latest completed session).
+    """
+    if market not in {"us", "cn"}:
+        raise ValueError(f"unsupported market: {market}")
+    source = "yfinance" if market == "us" else "baostock"
+    watermark = state.get_watermark(source, "daily_bars", market)
+    target = end or (
+        date.fromisoformat(watermark) if watermark else latest_session(market, run_date)
+    )
+    identity = (
+        f"{market}:{source}:schema{BAR_SCHEMA_VERSION}:{start.isoformat()}:{target.isoformat()}"
+    )
+    if force:
+        identity += f":{_utc_now().strftime('%Y%m%dT%H%M%S')}"
+    lease = state.acquire_job(
+        "backfill_daily_bars",
+        identity,
+        {"market": market, "source": source, "start": start.isoformat(), "end": target.isoformat()},
+    )
+    if not lease.acquired:
+        return lease, None, {"noop": True, "reason": lease.reason, "errors": []}
+    assert lease.run_id is not None
+    try:
+        instruments = _universe_instruments(universe_path, market)
+        retrieved_at = _utc_now().isoformat()
+        bars_by_symbol, successful, errors = _fetch_market_bars(
+            market, instruments, start, target, provider
+        )
+        coverage = len(successful) / len(instruments) if instruments else 1.0
+        rows = [
+            _bar_row(bar, market, source, retrieved_at)
+            for bars in bars_by_symbol.values()
+            for bar in bars
+        ]
+        store.write_raw(
+            source,
+            "daily_bars_backfill",
+            market,
+            run_date,
+            {"rows": rows, "errors": errors},
+            identity.replace(":", "-"),
+            {"capture_level": "adapter_output", "coverage": coverage, "start": start.isoformat()},
+        )
+        if coverage < minimum_coverage:
+            raise RuntimeError(
+                f"coverage {coverage:.2%} is below {minimum_coverage:.2%}; errors={errors[:5]}"
+            )
+        if not rows:
+            raise RuntimeError("provider returned no rows for backfill")
+        comparison = _compare_with_existing(store, market, rows)
+        previous_parts = _daily_bar_parts(store, market)
+        with ProcessLock(store.root / "state" / "parquet-writer.lock"):
+            result = store.write_rows(
+                "daily_bars",
+                market,
+                source,
+                run_date,
+                rows,
+                identity.replace(":", "-"),
+                schema_version=BAR_SCHEMA_VERSION,
+                validator=validate_bar_row,
+            )
+            archived = _archive_parts(
+                store, [path for path in previous_parts if path != result.path], run_date
+            )
+        state.record_source_success(source)
+        summary = {
+            "target_session": target.isoformat(),
+            "start": start.isoformat(),
+            "coverage": coverage,
+            "rows": result.row_count,
+            "rejected": len(rows) - result.row_count,
+            "symbols": len(successful),
+            "archived_parts": archived,
+            "comparison": comparison,
+            "errors": errors,
+        }
+        state.complete_job(lease.run_id, result.row_count, summary)
+        return lease, result, {"noop": False, **summary}
     except Exception as exc:
         state.record_source_failure(source, f"{type(exc).__name__}: {exc}")
         state.fail_job(lease.run_id, f"{type(exc).__name__}: {exc}")

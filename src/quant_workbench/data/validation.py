@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 PROVENANCE_FIELDS = {
     "source",
     "source_symbol",
@@ -18,7 +17,17 @@ def _missing(row: dict[str, Any], fields: set[str]) -> list[str]:
     return [f"missing:{field}" for field in sorted(fields) if row.get(field) in (None, "")]
 
 
+BAR_SCHEMA_VERSION = 2
+RAW_ADJUSTMENT = "raw"
+
+
 def validate_bar_row(row: dict[str, Any]) -> list[str]:
+    """Validate a daily bar row.
+
+    schema_version 1 rows carry provider-adjusted prices (legacy cache import).
+    schema_version >= 2 rows must be raw prices plus a positive single-event
+    ``adj_factor`` so adjustment can be recomputed at read time.
+    """
     errors = _missing(
         row,
         PROVENANCE_FIELDS | {"open", "high", "low", "close", "session_date", "adjustment"},
@@ -33,6 +42,31 @@ def validate_bar_row(row: dict[str, Any]) -> list[str]:
             errors.append("negative_volume")
     except (KeyError, TypeError, ValueError):
         errors.append("invalid_numeric_value")
+    try:
+        version = int(row.get("schema_version") or 1)
+    except (TypeError, ValueError):
+        version = 1
+    if version >= 2:
+        if row.get("adjustment") != RAW_ADJUSTMENT:
+            errors.append("schema2_requires_raw_adjustment")
+        try:
+            if float(row.get("adj_factor")) <= 0:
+                errors.append("non_positive_adj_factor")
+        except (TypeError, ValueError):
+            errors.append("missing:adj_factor")
+        try:
+            if row.get("dividend") not in (None, "") and float(row["dividend"]) < 0:
+                errors.append("negative_dividend")
+            if row.get("split_ratio") not in (None, "") and float(row["split_ratio"]) <= 0:
+                errors.append("non_positive_split_ratio")
+        except (TypeError, ValueError):
+            errors.append("invalid_corporate_action_value")
+        try:
+            if row.get("effective_at") and row.get("retrieved_at"):
+                if str(row["effective_at"])[:10] > str(row["retrieved_at"])[:10]:
+                    errors.append("effective_after_retrieved")
+        except TypeError:
+            errors.append("invalid_timestamp")
     return errors
 
 
