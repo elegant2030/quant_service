@@ -843,6 +843,55 @@ def render_telegram(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _deliver_market_report(
+    store: DatasetStore,
+    report: dict[str, Any],
+    gpt_markdown_path: Path,
+    current: datetime,
+    prior: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Deliver summary and full GPT attachment independently for safe retries."""
+    previous = prior or {}
+    legacy_sent = bool(previous.get("sent")) and "summary_sent" not in previous
+    summary_sent = bool(previous.get("summary_sent")) or legacy_sent
+    document_required = report.get("gpt_analysis", {}).get("status") == "completed"
+    document_sent = bool(previous.get("document_sent"))
+    summary_error = previous.get("summary_error")
+    document_error = previous.get("document_error")
+    summary_message_id = previous.get("summary_message_id")
+    document_message_id = previous.get("document_message_id")
+    notifier = TelegramNotifier(load_alert_config(store.root))
+    if not summary_sent:
+        result = notifier.send(render_telegram(report))
+        summary_sent = result.ok
+        summary_error = result.error
+        summary_message_id = result.message_id
+    if document_required and not document_sent:
+        result = notifier.send_document(
+            gpt_markdown_path,
+            f"Quant Workbench {report['market_name']}{report['stage_name']} GPT 完整报告",
+        )
+        document_sent = result.ok
+        document_error = result.error
+        document_message_id = result.message_id
+    sent = summary_sent and (document_sent if document_required else True)
+    errors = [error for error in (summary_error, document_error) if error]
+    return {
+        "attempted": True,
+        "sent": sent,
+        "error": " | ".join(errors) or None,
+        "attempted_at": current.astimezone(timezone.utc).isoformat(),
+        "summary_sent": summary_sent,
+        "summary_error": summary_error,
+        "summary_message_id": summary_message_id,
+        "document_required": document_required,
+        "document_sent": document_sent if document_required else False,
+        "document_error": document_error if document_required else None,
+        "document_message_id": document_message_id if document_required else None,
+        "document_path": str(gpt_markdown_path) if document_required else None,
+    }
+
+
 def build_market_brief(
     store: DatasetStore,
     market: str,
@@ -999,6 +1048,11 @@ def build_market_brief(
         "prompt_version": report["gpt_analysis"].get("prompt_version"),
         "material_sha256": report["gpt_analysis"].get("material_sha256"),
     }
+    gpt_base = base.with_name(f"{stage}-gpt")
+    gpt_json_path = store.write_json(gpt_base.with_suffix(".json"), report["gpt_analysis"])
+    gpt_markdown_path = store.write_text(
+        gpt_base.with_suffix(".md"), render_gpt_markdown(report["gpt_analysis"], report)
+    )
     prior_delivery: dict[str, Any] = {}
     existing_json_path = store.root / base.with_suffix(".json")
     if existing_json_path.is_file():
@@ -1008,27 +1062,29 @@ def build_market_brief(
             )
         except (OSError, ValueError):
             prior_delivery = {}
-    sent = bool(prior_delivery.get("sent"))
-    send_error: str | None = prior_delivery.get("error")
-    attempted_at = prior_delivery.get("attempted_at")
-    if send and not sent:
-        config = load_alert_config(store.root)
-        result = TelegramNotifier(config).send(render_telegram(report))
-        sent, send_error = result.ok, result.error
-        attempted_at = current.astimezone(timezone.utc).isoformat()
-    report["delivery"] = {
-        "attempted": bool(send or prior_delivery.get("attempted")),
-        "sent": sent,
-        "error": send_error,
-        "attempted_at": attempted_at,
-    }
+    if send:
+        report["delivery"] = _deliver_market_report(
+            store, report, gpt_markdown_path, current, prior_delivery
+        )
+    else:
+        report["delivery"] = prior_delivery or {
+            "attempted": False,
+            "sent": False,
+            "error": None,
+            "attempted_at": None,
+            "summary_sent": False,
+            "document_required": report["gpt_analysis"]["status"] == "completed",
+            "document_sent": False,
+            "document_path": (
+                str(gpt_markdown_path)
+                if report["gpt_analysis"]["status"] == "completed"
+                else None
+            ),
+        }
+    sent = bool(report["delivery"].get("sent"))
+    send_error: str | None = report["delivery"].get("error")
     json_path = store.write_json(base.with_suffix(".json"), report)
     markdown_path = store.write_text(base.with_suffix(".md"), render_markdown(report))
-    gpt_base = base.with_name(f"{stage}-gpt")
-    gpt_json_path = store.write_json(gpt_base.with_suffix(".json"), report["gpt_analysis"])
-    gpt_markdown_path = store.write_text(
-        gpt_base.with_suffix(".md"), render_gpt_markdown(report["gpt_analysis"], report)
-    )
     artifacts = ReportArtifacts(
         market,
         stage,
@@ -1093,23 +1149,34 @@ def run_due_market_briefs(
                 if send:
                     try:
                         prior = json.loads(path.read_text(encoding="utf-8"))
-                        if not (prior.get("delivery") or {}).get("sent"):
-                            result = TelegramNotifier(load_alert_config(store.root)).send(
-                                render_telegram(prior)
+                        delivery = prior.get("delivery") or {}
+                        legacy_summary = bool(delivery.get("sent")) and (
+                            "summary_sent" not in delivery
+                        )
+                        summary_sent = bool(delivery.get("summary_sent")) or legacy_summary
+                        document_required = (
+                            (prior.get("gpt_analysis") or {}).get("status") == "completed"
+                        )
+                        document_sent = bool(delivery.get("document_sent"))
+                        if not summary_sent or (document_required and not document_sent):
+                            gpt_path = path.with_name(f"{stage}-gpt.md")
+                            if document_required and not gpt_path.is_file():
+                                store.write_text(
+                                    gpt_path,
+                                    render_gpt_markdown(prior["gpt_analysis"], prior),
+                                )
+                            prior["delivery"] = _deliver_market_report(
+                                store, prior, gpt_path, current, delivery
                             )
-                            prior["delivery"] = {
-                                "attempted": True,
-                                "sent": result.ok,
-                                "error": result.error,
-                                "attempted_at": current.astimezone(timezone.utc).isoformat(),
-                            }
                             store.write_json(path, prior)
                             output["delivery_retries"].append(
                                 {
                                     "market": market,
                                     "stage": stage,
-                                    "sent": result.ok,
-                                    "error": result.error,
+                                    "sent": prior["delivery"]["sent"],
+                                    "summary_sent": prior["delivery"]["summary_sent"],
+                                    "document_sent": prior["delivery"]["document_sent"],
+                                    "error": prior["delivery"]["error"],
                                 }
                             )
                             continue

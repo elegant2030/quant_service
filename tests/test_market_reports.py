@@ -4,11 +4,14 @@ import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
+from quant_workbench.ops.alert import SendResult
 from quant_workbench.reports.market_brief import (
+    _deliver_market_report,
     build_market_brief,
     due_report_stages,
     render_telegram,
@@ -77,6 +80,34 @@ class ScheduleTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_delivery_adds_document_without_repeating_legacy_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = DatasetStore(directory)
+            document = Path(directory) / "report.md"
+            document.write_text("full report", encoding="utf-8")
+            notifier = Mock()
+            notifier.send_document.return_value = SendResult(True, None, 22)
+            with patch(
+                "quant_workbench.reports.market_brief.TelegramNotifier",
+                return_value=notifier,
+            ):
+                delivery = _deliver_market_report(
+                    store,
+                    {
+                        "market_name": "美股",
+                        "stage_name": "盘前",
+                        "gpt_analysis": {"status": "completed"},
+                    },
+                    document,
+                    datetime(2026, 9, 14, 12, 30, tzinfo=timezone.utc),
+                    {"attempted": True, "sent": True},
+                )
+        notifier.send.assert_not_called()
+        notifier.send_document.assert_called_once()
+        self.assertTrue(delivery["sent"])
+        self.assertTrue(delivery["summary_sent"])
+        self.assertTrue(delivery["document_sent"])
+
     def test_report_has_exact_counts_and_writes_both_formats(self) -> None:
         frame = synthetic_bars()
         live = {

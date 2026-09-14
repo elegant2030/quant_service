@@ -13,10 +13,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +34,8 @@ TELEGRAM_API = "https://api.telegram.org"
 DEFAULT_REPEAT_HOURS = 6
 DEFAULT_HEARTBEAT_HOUR = 9
 MAX_MESSAGE_CHARS = 3500
+MAX_DOCUMENT_BYTES = 49_000_000
+MAX_DOCUMENT_CAPTION_CHARS = 900
 CONSECUTIVE_FAILURE_THRESHOLD = 2
 
 
@@ -129,6 +133,12 @@ class Transport(Protocol):
     def __call__(self, url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]: ...
 
 
+class DocumentTransport(Protocol):
+    def __call__(
+        self, url: str, fields: dict[str, str], path: Path, timeout: float
+    ) -> dict[str, Any]: ...
+
+
 def _urllib_transport(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     body = urllib.parse.urlencode(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -138,6 +148,35 @@ def _urllib_transport(url: str, payload: dict[str, Any], timeout: float) -> dict
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - fixed host
+        return json.loads(response.read().decode("utf-8") or "{}")
+
+
+def _urllib_document_transport(
+    url: str, fields: dict[str, str], path: Path, timeout: float
+) -> dict[str, Any]:
+    boundary = f"----QuantWorkbench{uuid.uuid4().hex}"
+    body = bytearray()
+    for name, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        body.extend(value.encode("utf-8"))
+        body.extend(b"\r\n")
+    filename = path.name.replace('"', "_")
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(
+        f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'.encode()
+    )
+    body.extend(f"Content-Type: {content_type}\r\n\r\n".encode())
+    body.extend(path.read_bytes())
+    body.extend(f"\r\n--{boundary}--\r\n".encode())
+    request = urllib.request.Request(
+        url,
+        data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
         return json.loads(response.read().decode("utf-8") or "{}")
 
 
@@ -155,10 +194,12 @@ class TelegramNotifier:
         self,
         config: AlertConfig,
         transport: Transport | None = None,
+        document_transport: DocumentTransport | None = None,
         timeout: float = 10.0,
     ) -> None:
         self.config = config
         self.transport = transport or _urllib_transport
+        self.document_transport = document_transport or _urllib_document_transport
         self.timeout = timeout
 
     def send(self, text: str) -> SendResult:
@@ -172,6 +213,39 @@ class TelegramNotifier:
         }
         try:
             response = self.transport(url, payload, self.timeout)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace")[:200]
+            except Exception:  # pragma: no cover - best effort
+                pass
+            return SendResult(False, f"HTTP {exc.code}: {detail or exc.reason}")
+        except Exception as exc:
+            return SendResult(False, f"{type(exc).__name__}: {exc}")
+        if not response.get("ok"):
+            return SendResult(False, f"telegram: {response.get('description', 'unknown error')}")
+        result = response.get("result") or {}
+        return SendResult(True, None, result.get("message_id"))
+
+    def send_document(self, path: Path, caption: str | None = None) -> SendResult:
+        """Upload a complete report; failures never interrupt the report job."""
+        if not self.config.configured:
+            return SendResult(False, "alerts not configured")
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            return SendResult(False, f"{type(exc).__name__}: {exc}")
+        if size > MAX_DOCUMENT_BYTES:
+            return SendResult(False, f"document exceeds {MAX_DOCUMENT_BYTES} bytes")
+        url = f"{TELEGRAM_API}/bot{self.config.bot_token}/sendDocument"
+        fields = {
+            "chat_id": self.config.chat_id,
+            "disable_content_type_detection": "false",
+        }
+        if caption:
+            fields["caption"] = caption[:MAX_DOCUMENT_CAPTION_CHARS]
+        try:
+            response = self.document_transport(url, fields, path, self.timeout)
         except urllib.error.HTTPError as exc:
             detail = ""
             try:

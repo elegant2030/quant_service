@@ -33,6 +33,22 @@ class FakeTransport:
         return {"ok": True, "result": {"message_id": len(self.calls)}}
 
 
+class FakeDocumentTransport:
+    def __init__(self, fail: bool = False) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.fail = fail
+
+    def __call__(
+        self, url: str, fields: dict[str, str], path: Path, timeout: float
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {"url": url, "fields": fields, "path": path, "timeout": timeout}
+        )
+        if self.fail:
+            raise ConnectionError("upload down")
+        return {"ok": True, "result": {"message_id": len(self.calls)}}
+
+
 def config(**overrides: Any) -> AlertConfig:
     base = {"bot_token": "123:abc", "chat_id": "42", "heartbeat_timezone": "UTC"}
     base.update(overrides)
@@ -104,6 +120,24 @@ class NotifierTests(unittest.TestCase):
         self.assertIn("ConnectionError", result.error or "")
         unconfigured = TelegramNotifier(AlertConfig(), FakeTransport()).send("hello")
         self.assertFalse(unconfigured.ok)
+
+    def test_send_document_uploads_complete_file_and_never_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.md"
+            path.write_text("complete report", encoding="utf-8")
+            transport = FakeDocumentTransport()
+            result = TelegramNotifier(
+                config(), document_transport=transport
+            ).send_document(path, "完整报告")
+            self.assertTrue(result.ok)
+            self.assertIn("/bot123:abc/sendDocument", transport.calls[0]["url"])
+            self.assertEqual(transport.calls[0]["fields"]["chat_id"], "42")
+            self.assertEqual(transport.calls[0]["path"], path)
+            failed = TelegramNotifier(
+                config(), document_transport=FakeDocumentTransport(fail=True)
+            ).send_document(path)
+            self.assertFalse(failed.ok)
+            self.assertIn("ConnectionError", failed.error or "")
 
 
 class HealthAlertRuleTests(unittest.TestCase):

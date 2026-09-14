@@ -62,7 +62,9 @@ data/reports/market/{us|cn}/YYYY-MM-DD/{premarket|midday|postmarket}-gpt.json
 data/reports/market/{us|cn}/YYYY-MM-DD/{premarket|midday|postmarket}-gpt.md
 ```
 
-主 Markdown 会附上完整 GPT 解读；Telegram 会追加摘要和最多 5 个高优先级复核标的，以避免消息过长。
+主 Markdown 会附上完整 GPT 解读。Telegram 先发送摘要和最多 5 个高优先级复核标的，
+随后使用 `sendDocument` 上传完整的 `*-gpt.md`。摘要与附件分别记录送达状态；附件失败时
+只重试附件，不重复发送摘要。
 
 ## 手工验证
 
