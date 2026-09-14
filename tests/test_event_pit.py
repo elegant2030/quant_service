@@ -10,6 +10,7 @@ import pandas as pd
 from quant_workbench.events.pit import (
     CninfoAnnouncementProvider,
     YFinanceNewsProvider,
+    classify_event_text,
     ingest_events,
     validate_event_row,
 )
@@ -17,6 +18,16 @@ from quant_workbench.store import DatasetStore, StateStore
 
 
 class EventProviderTests(unittest.TestCase):
+    def test_rate_hike_forecast_is_macro_expectation_not_confirmed_fact(self) -> None:
+        score = classify_event_text(
+            "UBS expects two Fed rate hikes by end of 2026 after jobs data"
+        )
+        self.assertEqual(score["event_type"], "macro")
+        self.assertEqual(score["subtype"], "central_bank")
+        self.assertEqual(score["scope"], "market")
+        self.assertEqual(score["certainty"], "likely")
+        self.assertEqual(score["direction"], -1)
+
     def test_yfinance_normalizes_timestamp_url_and_direction(self) -> None:
         payload = [
             {

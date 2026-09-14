@@ -1,4 +1,4 @@
-# 事件分类枚举（v1）
+# 事件分类枚举（v2）
 
 LLM 只能从下列 `event_type.subtype` 中选择。新增类型需先修改本文件与 `events/taxonomy.py`，并提升 `taxonomy_version`。
 

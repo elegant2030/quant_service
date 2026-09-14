@@ -40,6 +40,11 @@ install -m 644 "$PROJECT_ROOT/data/cache/sector_probe/universe_us.csv" \
 install -m 644 "$PROJECT_ROOT/data/cache/sector_probe/universe_cn.csv" \
   "$RUNTIME_ROOT/config/universe_cn.csv"
 
+# Daily committee prompts embed and hash every project skill.  Keep a runtime copy
+# because LaunchAgent deliberately runs outside the Documents checkout.
+mkdir -p "$RUNTIME_ROOT/skills"
+rsync -a --delete "$PROJECT_ROOT/.claude/skills/" "$RUNTIME_ROOT/skills/"
+
 "$RUNTIME_ROOT/venv/bin/quant-workbench" ops-init --root "$RUNTIME_ROOT/data"
 
 # Record what was deployed so health/latest.json can expose build_sha / deployed_at.

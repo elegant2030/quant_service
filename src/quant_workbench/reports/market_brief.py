@@ -23,6 +23,7 @@ from quant_workbench.ai.market_report import (
     generate_gpt_analysis,
     render_gpt_markdown,
 )
+from quant_workbench.events.pit import classify_event_text
 from quant_workbench.ops.alert import TelegramNotifier, load_alert_config
 from quant_workbench.store import DatasetStore
 
@@ -426,6 +427,20 @@ def _apply_event_scores(cross: Any, events: Any | None, as_of: datetime) -> Any:
         return cross
     current = as_of.astimezone(timezone.utc)
     frame = events.copy()
+    macro_mask = frame.apply(
+        lambda row: classify_event_text(
+            str(row.get("title") or ""), str(row.get("summary") or "")
+        )["event_type"]
+        == "macro"
+        or str(row.get("scope") or "") == "market",
+        axis=1,
+    )
+    frame = frame[~macro_mask].copy()
+    if frame.empty:
+        for name, value in defaults.items():
+            cross[name] = value
+        cross["pre_news_score"] = cross["score"]
+        return cross
     frame["direction"] = pd.to_numeric(frame["direction"], errors="coerce").fillna(0.0)
     frame["confidence"] = pd.to_numeric(frame["confidence"], errors="coerce").fillna(0.0)
     effective = pd.to_datetime(frame["effective_at"], utc=True, errors="coerce")
@@ -469,6 +484,62 @@ def _apply_event_scores(cross: Any, events: Any | None, as_of: datetime) -> Any:
         + merged.loc[eligible, "news_score"] * 0.15
     )
     return merged
+
+
+def _macro_event_context(events: Any | None, as_of: datetime) -> list[dict[str, Any]]:
+    """Extract market-wide macro events without applying them to individual scores."""
+    if events is None or events.empty:
+        return []
+    frame = events.copy()
+    frame = frame.sort_values("retrieved_at" if "retrieved_at" in frame else "published_at")
+    if "event_id" in frame:
+        frame = frame.drop_duplicates("event_id", keep="last")
+    current = as_of.astimezone(timezone.utc)
+    rows: list[dict[str, Any]] = []
+    for item in frame.to_dict(orient="records"):
+        classified = classify_event_text(
+            str(item.get("title") or ""), str(item.get("summary") or "")
+        )
+        if classified["event_type"] != "macro" and item.get("scope") != "market":
+            continue
+        published = str(item.get("published_at") or item.get("effective_at") or "")
+        try:
+            published_at = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            if published_at.tzinfo is None:
+                published_at = published_at.replace(tzinfo=timezone.utc)
+            elapsed = (current - published_at.astimezone(timezone.utc)).total_seconds()
+            age_hours = max(elapsed, 0) / 3600
+        except ValueError:
+            age_hours = 9999.0
+        certainty = str(classified.get("certainty") or item.get("certainty") or "likely")
+        rows.append(
+            {
+                "event_id": str(item.get("event_id") or ""),
+                "title": str(item.get("title") or ""),
+                "summary": str(item.get("summary") or ""),
+                "publisher": str(item.get("publisher") or item.get("source") or "unknown"),
+                "url": str(item.get("url") or ""),
+                "published_at": published,
+                "event_type": "macro",
+                "subtype": str(classified.get("subtype") or "other_macro"),
+                "scope": "market",
+                "certainty": certainty,
+                "fact_status": "预期/预测" if certainty in {"rumor", "likely"} else "已确认",
+                "direction": int(classified.get("direction") or 0),
+                "confidence": _number(classified.get("confidence"), 0.5),
+                "scoring_method": str(classified.get("scoring_method")),
+                "age_hours": round(age_hours, 1),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            row["subtype"] == "central_bank",
+            row["confidence"],
+            -row["age_hours"],
+        ),
+        reverse=True,
+    )
+    return rows[:8]
 
 
 def _stock_reason(row: dict[str, Any]) -> dict[str, Any]:
@@ -738,12 +809,38 @@ def render_markdown(report: dict[str, Any]) -> str:
             if news_symbols
             else "> 近14日没有可用事件，本版不会冒充消息面结论。"
         ),
-        "",
-        "## 热度板块 TOP 5",
-        "",
-        "| 排名 | 板块 | 热度 | 成分数 | 推荐依据 | 具体理由 |",
-        "|---:|---|---:|---:|---|---|",
     ]
+    macro_events = report.get("macro_events") or []
+    if macro_events:
+        lines.extend(["", "## 宏观与政策事件（不直接改写个股排名）", ""])
+        for item in macro_events:
+            if item["direction"] > 0:
+                direction = "偏多"
+            elif item["direction"] < 0:
+                direction = "偏空"
+            else:
+                direction = "中性/待确认"
+            link = f"[原文]({item['url']})" if item.get("url") else "无链接"
+            lines.append(
+                f"- **{item['fact_status']}｜{item['subtype']}｜{direction}**："
+                f"{item['title']}（{item['publisher']}，{item['published_at']}，{link}）"
+            )
+        lines.extend(
+            [
+                "",
+                "> “预期/预测”不得表述为已发生的政策决定；宏观方向仅作风险背景，"
+                "不会机械加到所有股票分数。",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## 热度板块 TOP 5",
+            "",
+            "| 排名 | 板块 | 热度 | 成分数 | 推荐依据 | 具体理由 |",
+            "|---:|---|---:|---:|---|---|",
+        ]
+    )
     for rank, row in enumerate(report["sectors"], 1):
         lines.append(
             f"| {rank} | {row['sector']} | {_number(row['heat_score']):.1f} | "
@@ -800,8 +897,14 @@ def render_telegram(report: dict[str, Any]) -> str:
         f"依据: 技术/量价/风险调整 + 基本面({fundamental_symbols}只) "
         f"+ 消息面({news_symbols}只，规则评分)",
         "",
-        "热度板块 TOP5",
     ]
+    macro_events = report.get("macro_events") or []
+    if macro_events:
+        lines.append("宏观重点")
+        for item in macro_events[:3]:
+            lines.append(f"- [{item['fact_status']}] {item['title'][:110]}")
+        lines.append("")
+    lines.append("热度板块 TOP5")
     for rank, row in enumerate(report["sectors"], 1):
         lines.append(
             f"{rank}. {row['sector']} {_number(row['heat_score']):.1f} "
@@ -969,8 +1072,9 @@ def build_market_brief(
         data_mode = "最新完成日线（盘前）"
     else:
         data_mode = "已完成日线（实时快照不可用）"
+    macro_events = _macro_event_context(events, current)
     report = {
-        "schema_version": 4,
+        "schema_version": 5,
         "market": market,
         "market_name": MARKET_NAMES[market],
         "timezone": str(market_timezone),
@@ -995,6 +1099,7 @@ def build_market_brief(
         "sectors": sectors,
         "stocks": stocks,
         "options": _option_pulse(store) if market == "us" else [],
+        "macro_events": macro_events,
         "evidence_coverage": {
             "technical_and_price_volume": "included",
             "fundamental": {
@@ -1009,6 +1114,12 @@ def build_market_brief(
                 "lookback_days": 14,
                 "weight": 0.15,
                 "method": "deterministic_title_summary_keywords_v1",
+            },
+            "macro": {
+                "status": "included_when_available",
+                "events": len(macro_events),
+                "method": "market_scope_taxonomy_v2",
+                "score_effect": "context_only_not_applied_to_individual_stock_scores",
             },
             "options": "market_level_only" if market == "us" else "not_applicable",
             "llm": {
@@ -1218,5 +1329,42 @@ def run_due_market_briefs(
             except Exception as exc:
                 output["status"] = "error"
                 output["errors"].append(f"{market}/{stage}: {type(exc).__name__}: {exc}")
+    output["daily_committee"] = {"due": False}
+    try:
+        from quant_workbench.reports.daily_committee import (
+            build_daily_committee,
+            daily_committee_due,
+        )
+
+        if generate_gpt and daily_committee_due(current):
+            committee, artifacts = build_daily_committee(
+                store,
+                current,
+                send=send,
+                model=gpt_model,
+            )
+            output["daily_committee"] = {
+                "due": True,
+                "status": committee["status"],
+                "json_path": str(artifacts.json_path),
+                "markdown_path": str(artifacts.markdown_path),
+                "sent": artifacts.sent,
+                "send_error": artifacts.send_error,
+                "skills": len(committee.get("skills") or []),
+                "experts": len(committee.get("expert_roles") or []),
+            }
+            if committee["status"] != "completed":
+                output["status"] = "error"
+                output["errors"].append(
+                    f"daily committee: {committee.get('reason', committee['status'])}"
+                )
+    except Exception as exc:
+        output["status"] = "error"
+        output["errors"].append(f"daily committee: {type(exc).__name__}: {exc}")
+        output["daily_committee"] = {
+            "due": True,
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     store.write_json("health/last-market-reports-run.json", output)
     return output

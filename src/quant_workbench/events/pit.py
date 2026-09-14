@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from quant_workbench.store import DatasetStore, StateStore
 
 DATASET = "events"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -76,6 +76,66 @@ NEGATIVE_TERMS = (
     "layoffs",
 )
 
+US_MACRO_PROXIES = ("SPY", "QQQ", "TLT")
+EXPECTATION_TERMS = (
+    "expect",
+    "forecast",
+    "likely",
+    "could",
+    "may ",
+    "might",
+    "odds",
+    "bets",
+    "priced in",
+    "ahead",
+    "预期",
+    "预计",
+    "或将",
+    "可能",
+)
+CENTRAL_BANK_TERMS = (
+    "federal reserve",
+    "fomc",
+    "fed meeting",
+    "fed rate",
+    "rate hike",
+    "rate cut",
+    "interest rate decision",
+    "加息",
+    "降息",
+    "美联储",
+    "央行",
+)
+MACRO_DATA_TERMS = (
+    "cpi",
+    "ppi",
+    "inflation",
+    "nonfarm",
+    "payrolls",
+    "unemployment",
+    "gdp",
+    "pmi",
+    "通胀",
+    "非农",
+    "失业率",
+    "居民消费价格",
+)
+CONFIRMED_MONETARY_TERMS = (
+    "fed raises rates",
+    "fed hikes rates",
+    "fomc raises rates",
+    "fed cuts rates",
+    "fomc cuts rates",
+    "decision to raise rates",
+    "decision to cut rates",
+    "announces rate increase",
+    "announces rate cut",
+    "宣布加息",
+    "宣布降息",
+    "决定加息",
+    "决定降息",
+)
+
 
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
@@ -102,8 +162,48 @@ def _event_id(source: str, source_id: str, url: str, title: str) -> str:
     return f"{source}:{hashlib.sha256(f'{url}|{title}'.encode()).hexdigest()[:24]}"
 
 
-def _classify(title: str, summary: str = "") -> dict[str, Any]:
+def classify_event_text(title: str, summary: str = "") -> dict[str, Any]:
+    """Classify title/summary, preserving forecast versus confirmed macro facts."""
     text = f"{title} {summary}".lower()
+    expectation = any(term in text for term in EXPECTATION_TERMS)
+    central_bank = any(term in text for term in CENTRAL_BANK_TERMS)
+    macro_data = any(term in text for term in MACRO_DATA_TERMS)
+    if central_bank or macro_data:
+        subtype = "central_bank" if central_bank else "data_release"
+        direction = 0
+        if central_bank:
+            if any(term in text for term in ("rate hike", "hikes", "raises rates", "加息")):
+                direction = -1
+            elif any(term in text for term in ("rate cut", "cuts rates", "降息")):
+                direction = 1
+        elif any(term in text for term in ("hotter", "accelerat", "above forecast", "超预期")):
+            direction = -1
+        elif any(term in text for term in ("cooler", "eas", "below forecast", "低于预期")):
+            direction = 1
+        confirmed = any(term in text for term in CONFIRMED_MONETARY_TERMS)
+        certainty = "likely" if central_bank and not confirmed else "confirmed"
+        if expectation:
+            certainty = "likely"
+        return {
+            "event_type": "macro",
+            "subtype": subtype,
+            "direction": direction,
+            "magnitude": "none",
+            "novelty": 1.0,
+            "scope": "market",
+            "horizon": "quarter" if central_bank else "days",
+            "certainty": certainty,
+            "affected_driver": "multiple" if central_bank else "margin",
+            "maps_to_estimate": False,
+            "confidence": 0.75 if central_bank else 0.65,
+            "matched_terms": [
+                term
+                for term in (*CENTRAL_BANK_TERMS, *MACRO_DATA_TERMS)
+                if term in text
+            ][:6],
+            "scoring_method": "deterministic_macro_taxonomy_v2",
+            "taxonomy_version": 2,
+        }
     positive = [term for term in POSITIVE_TERMS if term in text]
     negative = [term for term in NEGATIVE_TERMS if term in text]
     raw_direction = len(positive) - len(negative)
@@ -143,6 +243,11 @@ def _classify(title: str, summary: str = "") -> dict[str, Any]:
         "scoring_method": "deterministic_title_summary_keywords_v1",
         "taxonomy_version": 1,
     }
+
+
+def _classify(title: str, summary: str = "") -> dict[str, Any]:
+    """Backward-compatible internal alias."""
+    return classify_event_text(title, summary)
 
 
 def _tradable_at(market: str, published_at: datetime) -> datetime:
@@ -374,6 +479,18 @@ def ingest_events(
     if symbols:
         wanted = {symbol.upper() for symbol in symbols}
         members = [row for row in members if row["symbol"].upper() in wanted]
+    elif market == "us":
+        existing = {row["symbol"].upper() for row in members}
+        members.extend(
+            {
+                "symbol": symbol,
+                "exchange": "ARCX",
+                "name": f"Macro proxy {symbol}",
+                "sector": "Market Proxy",
+            }
+            for symbol in US_MACRO_PROXIES
+            if symbol not in existing
+        )
     if limit:
         members = members[:limit]
     identity = (

@@ -11,7 +11,9 @@ import pandas as pd
 
 from quant_workbench.ops.alert import SendResult
 from quant_workbench.reports.market_brief import (
+    _apply_event_scores,
     _deliver_market_report,
+    _macro_event_context,
     build_market_brief,
     due_report_stages,
     render_telegram,
@@ -77,6 +79,40 @@ class ScheduleTests(unittest.TestCase):
                 ),
                 [],
             )
+
+
+class MacroEventTests(unittest.TestCase):
+    def test_macro_expectation_is_visible_but_does_not_change_stock_score(self) -> None:
+        cross = pd.DataFrame([{"symbol": "UBS", "score": 72.0}])
+        events = pd.DataFrame(
+            [
+                {
+                    "event_id": "rate-forecast",
+                    "symbol": "UBS",
+                    "source": "yfinance_news",
+                    "publisher": "Fixture Wire",
+                    "title": "UBS expects two Fed rate hikes by end of 2026",
+                    "summary": "",
+                    "url": "https://example.com/rates",
+                    "published_at": "2026-09-13T13:38:00+00:00",
+                    "effective_at": "2026-09-13T13:38:00+00:00",
+                    "retrieved_at": "2026-09-13T14:00:00+00:00",
+                    "direction": 0,
+                    "confidence": 0.35,
+                    "subtype": "other_corporate",
+                    "scope": "single",
+                    "scoring_method": "legacy",
+                }
+            ]
+        )
+        as_of = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+        scored = _apply_event_scores(cross, events, as_of)
+        macro = _macro_event_context(events, as_of)
+        self.assertEqual(float(scored.iloc[0]["score"]), 72.0)
+        self.assertEqual(int(scored.iloc[0]["news_event_count"]), 0)
+        self.assertEqual(len(macro), 1)
+        self.assertEqual(macro[0]["fact_status"], "预期/预测")
+        self.assertEqual(macro[0]["subtype"], "central_bank")
 
 
 class ReportTests(unittest.TestCase):

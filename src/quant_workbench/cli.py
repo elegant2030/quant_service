@@ -26,6 +26,7 @@ from quant_workbench.ops.alert import (
 )
 from quant_workbench.ops.backup import create_backup_snapshot, verify_backup_snapshot
 from quant_workbench.ops.health import build_health_report, write_health_report
+from quant_workbench.reports.daily_committee import build_daily_committee
 from quant_workbench.reports.market_brief import build_market_brief, run_due_market_briefs
 from quant_workbench.store import DatasetStore, StateStore
 from quant_workbench.strategy.momentum import CrossSectionalMomentum
@@ -499,6 +500,41 @@ def command_market_reports_due(args: argparse.Namespace) -> None:
         state.close()
 
 
+def command_daily_committee(args: argparse.Namespace) -> None:
+    store, state = _open_stores(args.root)
+    try:
+        report, artifacts = build_daily_committee(
+            store,
+            _parse_now(args.now),
+            report_date=date.fromisoformat(args.report_date) if args.report_date else None,
+            send=not args.no_send,
+            force=args.force,
+            model=args.gpt_model,
+            skill_root=Path(args.skill_root) if args.skill_root else None,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": report["status"],
+                    "report_date": report.get("report_date"),
+                    "skills": len(report.get("skills") or []),
+                    "experts": len(report.get("expert_roles") or []),
+                    "json_path": str(artifacts.json_path),
+                    "markdown_path": str(artifacts.markdown_path),
+                    "sent": artifacts.sent,
+                    "send_error": artifacts.send_error,
+                    "reason": report.get("reason"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        if args.strict and report["status"] != "completed":
+            raise SystemExit(2)
+    finally:
+        state.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="quant-workbench")
     subparsers = parser.add_subparsers(required=True)
@@ -662,6 +698,19 @@ def build_parser() -> argparse.ArgumentParser:
     reports_due.add_argument("--gpt-model", help="覆盖 OPENAI_REPORT_MODEL")
     reports_due.add_argument("--strict", action="store_true")
     reports_due.set_defaults(func=command_market_reports_due)
+
+    daily_committee = subparsers.add_parser(
+        "daily-committee", help="运行一次双市场、七专家、全项目Skills深度会诊"
+    )
+    daily_committee.add_argument("--root", default=str(DEFAULT_LAKE))
+    daily_committee.add_argument("--now", help="测试用ISO时间；无时区时按UTC")
+    daily_committee.add_argument("--report-date", help="使用该日期及之前的最新双市场报告")
+    daily_committee.add_argument("--skill-root", help="覆盖项目Skills目录")
+    daily_committee.add_argument("--gpt-model", help="覆盖QW_CODEX_MODEL")
+    daily_committee.add_argument("--no-send", action="store_true", help="只保存本地，不推送")
+    daily_committee.add_argument("--force", action="store_true", help="重新生成当日会诊")
+    daily_committee.add_argument("--strict", action="store_true")
+    daily_committee.set_defaults(func=command_daily_committee)
 
     run_due = subparsers.add_parser("run-due", help="按各市场已完成交易日运行到期作业")
     run_due.add_argument("--root", default=str(DEFAULT_LAKE))

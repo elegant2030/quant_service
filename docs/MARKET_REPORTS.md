@@ -24,6 +24,9 @@
 - 基本面：存在 PIT 财务数据时加入 ROE、利润率、增长、现金转化和负债率，权重 25%。
 - 消息面：最近 14 日带原始链接和发布时间的公告/新闻；有方向性事件时叠加 15%，
   无方向事件只展示、不改变评分。
+- 宏观面：从市场代理 ETF 与全量标题识别 Fed/FOMC、利率和主要经济数据事件，单列
+  `macro_events`；宏观事件只作市场风险背景，不机械加到某一只股票或所有股票分数。
+  `likely/rumor` 会显示为“预期/预测”，只有确认材料才显示“已确认”。
 - 期权面：美股报告附 SPY/QQQ Put/Call 和中位 IV，仅作为市场级背景，不冒充个股信号。
 
 每个板块和每只股票都输出 `推荐依据` 与 `具体理由`，直接列明属于技术面、量价面
@@ -52,7 +55,14 @@ data/reports/market/us/YYYY-MM-DD/postmarket.{json,md}
 data/reports/market/cn/YYYY-MM-DD/premarket.{json,md}
 data/reports/market/cn/YYYY-MM-DD/midday.{json,md}
 data/reports/market/cn/YYYY-MM-DD/postmarket.{json,md}
+data/reports/daily/YYYY-MM-DD/all-skills-committee.{json,md}
 ```
+
+美股收盘后 17:00 ET 起，`market-reports-due` 还会幂等生成一份双市场“每日全技能投委会”。
+它把运行时 `skills/*/SKILL.md` 的完整文本和 SHA-256 作为证据包交给当前 ChatGPT/Codex
+账号，固定调用七类专家视角，并要求对每个 Skill 输出 `applied`、`not_applicable` 或
+`blocked` 及证据。部署脚本会把仓库 `.claude/skills/` 同步到后台运行目录；因此报告中
+“使用全部 Skills”可以用清单、哈希和材料包哈希复核，不依赖模型自行声称。
 
 Telegram 使用运行时密钥文件：
 `/Users/lucky/Library/Application Support/QuantWorkbench/config/alerts.env`。
@@ -63,6 +73,7 @@ Telegram 使用运行时密钥文件：
 quant-workbench market-report --root data/lake --market us --stage midday
 quant-workbench market-report --root data/lake --market cn --stage postmarket
 quant-workbench market-reports-due --root data/lake
+quant-workbench daily-committee --root data/lake --report-date 2026-09-14
 ```
 
 加 `--no-live` 可禁止联网，加 `--no-send` 可只生成文件。报告是量化研究候选，不是
