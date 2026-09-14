@@ -284,10 +284,10 @@ def command_watchdog(args: argparse.Namespace) -> None:
             minimum_symbol_coverage=args.minimum_coverage,
             verify_checksums=args.full,
         )
-        history_path = write_health_report(store, report)
-        report["history_path"] = str(history_path)
         if not args.no_alerts:
             report["alerts"] = notify_health_report(store, state, report)
+        history_path = write_health_report(store, report)
+        report["history_path"] = str(history_path)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         if args.strict and report["status"] == "error":
             raise SystemExit(2)
