@@ -75,6 +75,14 @@ class DatasetStore:
         )
         return target
 
+    def write_text(self, path: Path | str, content: str) -> Path:
+        """Atomically write a UTF-8 text artifact below the data root."""
+        target = Path(path)
+        if not target.is_absolute():
+            target = self.root / target
+        self._atomic_bytes(target, content.encode("utf-8"))
+        return target
+
     def write_raw(
         self,
         source: str,

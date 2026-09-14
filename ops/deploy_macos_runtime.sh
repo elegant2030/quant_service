@@ -6,7 +6,7 @@ RUNTIME_ROOT="/Users/lucky/Library/Application Support/QuantWorkbench"
 AGENT_ROOT="/Users/lucky/Library/LaunchAgents"
 DOMAIN="gui/501"
 
-for label in pipeline watchdog backup; do
+for label in pipeline watchdog backup reports; do
   launchctl bootout "$DOMAIN/com.quantworkbench.$label" 2>/dev/null || true
 done
 
@@ -55,7 +55,7 @@ if [[ ! -f "$RUNTIME_ROOT/config/alerts.env" ]]; then
   echo "note: $RUNTIME_ROOT/config/alerts.env not found; alerts stay disabled (see docs/ALERTING.md)"
 fi
 
-for label in pipeline watchdog backup; do
+for label in pipeline watchdog backup reports; do
   install -m 644 "$PROJECT_ROOT/ops/launchd/com.quantworkbench.$label.plist" \
     "$AGENT_ROOT/com.quantworkbench.$label.plist"
   launchctl bootstrap "$DOMAIN" "$AGENT_ROOT/com.quantworkbench.$label.plist"

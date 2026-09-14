@@ -23,6 +23,7 @@ from quant_workbench.ops.alert import (
 )
 from quant_workbench.ops.backup import create_backup_snapshot, verify_backup_snapshot
 from quant_workbench.ops.health import build_health_report, write_health_report
+from quant_workbench.reports.market_brief import build_market_brief, run_due_market_briefs
 from quant_workbench.store import DatasetStore, StateStore
 from quant_workbench.strategy.momentum import CrossSectionalMomentum
 
@@ -329,6 +330,62 @@ def command_alert_test(args: argparse.Namespace) -> None:
         state.close()
 
 
+def _parse_now(value: str | None) -> datetime:
+    current = datetime.fromisoformat(value) if value else datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current
+
+
+def command_market_report(args: argparse.Namespace) -> None:
+    store, state = _open_stores(args.root)
+    try:
+        report, artifacts = build_market_brief(
+            store,
+            args.stage,
+            _parse_now(args.now),
+            fetch_live=not args.no_live,
+            send=not args.no_send,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "stage": report["stage"],
+                    "sectors": len(report["sectors"]),
+                    "stocks": len(report["stocks"]),
+                    "data_mode": report["data_mode"],
+                    "json_path": str(artifacts.json_path),
+                    "markdown_path": str(artifacts.markdown_path),
+                    "sent": artifacts.sent,
+                    "send_error": artifacts.send_error,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        if args.strict and (len(report["sectors"]) != 5 or len(report["stocks"]) != 15):
+            raise SystemExit(2)
+    finally:
+        state.close()
+
+
+def command_market_reports_due(args: argparse.Namespace) -> None:
+    store, state = _open_stores(args.root)
+    try:
+        result = run_due_market_briefs(
+            store,
+            _parse_now(args.now),
+            fetch_live=not args.no_live,
+            send=not args.no_send,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.strict and result["status"] != "ok":
+            raise SystemExit(2)
+    finally:
+        state.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="quant-workbench")
     subparsers = parser.add_subparsers(required=True)
@@ -407,6 +464,29 @@ def build_parser() -> argparse.ArgumentParser:
     alert_test.add_argument("--root", default=str(DEFAULT_LAKE))
     alert_test.add_argument("--text", default=None, help="自定义消息内容")
     alert_test.set_defaults(func=command_alert_test)
+
+    market_report = subparsers.add_parser(
+        "market-report", help="生成并推送盘前、盘中或盘后双市场热度报告"
+    )
+    market_report.add_argument("--root", default=str(DEFAULT_LAKE))
+    market_report.add_argument(
+        "--stage", choices=["premarket", "midday", "postmarket"], required=True
+    )
+    market_report.add_argument("--now", help="测试用ISO时间；无时区时按UTC")
+    market_report.add_argument("--no-live", action="store_true", help="只使用已完成日线")
+    market_report.add_argument("--no-send", action="store_true", help="只保存本地，不推送")
+    market_report.add_argument("--strict", action="store_true")
+    market_report.set_defaults(func=command_market_report)
+
+    reports_due = subparsers.add_parser(
+        "market-reports-due", help="补跑当天已到时点且尚未生成的三段市场报告"
+    )
+    reports_due.add_argument("--root", default=str(DEFAULT_LAKE))
+    reports_due.add_argument("--now", help="测试用ISO时间；无时区时按UTC")
+    reports_due.add_argument("--no-live", action="store_true", help="只使用已完成日线")
+    reports_due.add_argument("--no-send", action="store_true", help="只保存本地，不推送")
+    reports_due.add_argument("--strict", action="store_true")
+    reports_due.set_defaults(func=command_market_reports_due)
 
     run_due = subparsers.add_parser("run-due", help="按各市场已完成交易日运行到期作业")
     run_due.add_argument("--root", default=str(DEFAULT_LAKE))
