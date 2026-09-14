@@ -5,6 +5,9 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import json
+import os
+import tempfile
+from pathlib import Path
 
 FRAMEWORKS = {
     "vectorbt": ("vectorbt", "vectorbt", "parameter screening"),
@@ -19,6 +22,15 @@ FRAMEWORKS = {
 
 
 def inspect_frameworks() -> dict[str, dict[str, str | bool]]:
+    temp_root = Path(tempfile.gettempdir()) / "quant-workbench-framework-check"
+    matplotlib_cache = temp_root / "matplotlib"
+    edgar_data = temp_root / "edgar"
+    matplotlib_cache.mkdir(parents=True, exist_ok=True)
+    edgar_data.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_cache))
+    os.environ.setdefault("XDG_CACHE_HOME", str(temp_root))
+    os.environ.setdefault("EDGAR_LOCAL_DATA_DIR", str(edgar_data))
+
     result: dict[str, dict[str, str | bool]] = {}
     for name, (module_name, distribution_name, role) in FRAMEWORKS.items():
         try:

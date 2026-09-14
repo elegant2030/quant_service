@@ -21,6 +21,7 @@ research = [
   "lib-pybroker>=2.0,<3",
   "skfolio>=1.2,<2",
   "quantstats>=0.0.81,<0.1",
+  "plotly>=6,<7",
 ]
 filings = ["edgartools>=5.58,<6"]
 options-research = ["QuantLib>=1.43,<2", "optopsy>=2.2,<3"]
