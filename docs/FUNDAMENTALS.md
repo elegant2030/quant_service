@@ -58,3 +58,7 @@ quant-workbench fundamentals-due --root data/lake --universe-directory data/cach
 ```
 
 SEC API 文档：<https://www.sec.gov/search-filings/edgar-application-programming-interfaces>
+
+默认 User-Agent 仅使用本机占位联系地址 `contact@localhost`。为遵守 SEC Fair Access
+政策，长期运行前应在 LaunchAgent 环境或启动 shell 中设置可联系的
+`SEC_USER_AGENT="QuantWorkbench/0.1 your-email@example.com"`；该值不进入报告正文。

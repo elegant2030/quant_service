@@ -29,7 +29,7 @@ from quant_workbench.ops.alert import TelegramNotifier, load_alert_config
 from quant_workbench.store import DatasetStore
 
 NEW_YORK = ZoneInfo("America/New_York")
-PROMPT_VERSION = "daily_all_skills_committee_v1"
+PROMPT_VERSION = "daily_all_skills_committee_v2_evidence_pack"
 EXPERT_ROLES = (
     "宏观与跨资产专家",
     "量价与多策略专家",
@@ -230,6 +230,111 @@ def _trim_report(report: dict[str, Any]) -> dict[str, Any]:
     return {key: report.get(key) for key in keys}
 
 
+def _query_dataset(store: DatasetStore, dataset: str, sql: str) -> list[dict[str, Any]]:
+    """Return a compact deterministic evidence table from canonical Parquet."""
+    files = list((store.root / "canonical" / f"dataset={dataset}").rglob("*.parquet"))
+    if not files:
+        return []
+    try:
+        import duckdb
+    except ImportError:
+        return []
+    connection = duckdb.connect()
+    try:
+        frame = connection.execute(
+            sql,
+            [str(store.root / "canonical" / f"dataset={dataset}" / "**" / "*.parquet")],
+        ).df()
+        return frame.to_dict(orient="records")
+    finally:
+        connection.close()
+
+
+def _canonical_coverage(store: DatasetStore) -> dict[str, Any]:
+    """Summarize evidence already present so the LLM does not report it as absent."""
+    return {
+        "daily_bars": _query_dataset(
+            store,
+            "daily_bars",
+            """
+            SELECT market, count(*) AS rows, count(DISTINCT symbol) AS symbols,
+                   min(session_date) AS first_session, max(session_date) AS last_session,
+                   sum(CASE WHEN schema_version >= 2 THEN 1 ELSE 0 END) AS raw_schema_rows,
+                   sum(CASE WHEN adj_factor IS NOT NULL THEN 1 ELSE 0 END) AS factor_rows,
+                   sum(CASE WHEN COALESCE(dividend, 0) > 0 THEN 1 ELSE 0 END) AS dividend_rows,
+                   sum(CASE WHEN COALESCE(split_ratio, 0) > 0 THEN 1 ELSE 0 END) AS split_rows
+            FROM read_parquet(?, union_by_name=true)
+            GROUP BY market ORDER BY market
+            """,
+        ),
+        "fundamentals": _query_dataset(
+            store,
+            "fundamental_metrics",
+            """
+            SELECT market, source, count(*) AS rows,
+                   count(DISTINCT symbol) AS symbols,
+                   count(DISTINCT document_id) AS documents,
+                   min(effective_at) AS first_effective_at,
+                   max(effective_at) AS last_effective_at
+            FROM read_parquet(?, union_by_name=true)
+            GROUP BY market, source ORDER BY market, source
+            """,
+        ),
+        "events": _query_dataset(
+            store,
+            "events",
+            """
+            SELECT market, source, count(*) AS rows,
+                   count(DISTINCT symbol) AS symbols,
+                   count(DISTINCT event_id) AS events,
+                   min(published_at) AS first_published_at,
+                   max(published_at) AS last_published_at,
+                   sum(CASE WHEN direction != 0 THEN 1 ELSE 0 END) AS directional_rows,
+                   sum(CASE WHEN event_type = 'macro' THEN 1 ELSE 0 END) AS macro_rows
+            FROM read_parquet(?, union_by_name=true)
+            GROUP BY market, source ORDER BY market, source
+            """,
+        ),
+        "options": _query_dataset(
+            store,
+            "option_chain",
+            """
+            SELECT symbol, count(*) AS rows,
+                   count(DISTINCT expiration) AS expirations,
+                   min(effective_at) AS first_snapshot_at,
+                   max(effective_at) AS last_snapshot_at,
+                   sum(CASE WHEN bid > 0 AND ask > bid THEN 1 ELSE 0 END) AS quoted_rows,
+                   sum(CASE WHEN COALESCE(open_interest, 0) >= 100
+                                  OR COALESCE(volume, 0) >= 10 THEN 1 ELSE 0 END)
+                       AS active_rows
+            FROM read_parquet(?, union_by_name=true)
+            GROUP BY symbol ORDER BY symbol
+            """,
+        ),
+    }
+
+
+def _latest_strategy_research(store: DatasetStore) -> dict[str, Any] | None:
+    candidates = sorted((store.root / "research" / "strategy").glob("*.md"))
+    source_root = Path(__file__).resolve().parents[3] / "reports"
+    candidates.extend(sorted(source_root.glob("STRATEGY_RESEARCH_*.md")))
+    if not candidates:
+        return None
+    selected = max(candidates, key=lambda path: (path.stat().st_mtime, path.name))
+    content = selected.read_text(encoding="utf-8")
+    return {
+        "source": str(selected),
+        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "content": content[:16_000],
+        "status": "描述性回测",
+        "hard_limits": [
+            "当前成分股回看历史，存在幸存者偏差",
+            "尚无完整PIT股票池、退市收益、涨跌停/停牌与容量约束",
+            "未提供独立样本外、walk-forward、CPCV、DSR或PBO证据",
+        ],
+    }
+
+
 def build_committee_material(
     store: DatasetStore, as_of: date, skill_root: Path | None = None
 ) -> dict[str, Any]:
@@ -240,6 +345,8 @@ def build_committee_material(
             market: _trim_report(_latest_market_report(store, market, as_of))
             for market in ("us", "cn")
         },
+        "canonical_coverage": _canonical_coverage(store),
+        "strategy_research": _latest_strategy_research(store),
         "required_expert_roles": list(EXPERT_ROLES),
         "required_skill_names": [item["skill"] for item in skills],
         "skills": skills,

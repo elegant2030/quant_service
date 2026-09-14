@@ -742,6 +742,7 @@ def _select_rankings(cross: Any) -> tuple[list[dict[str, Any]], list[dict[str, A
 def _option_pulse(store: DatasetStore) -> list[dict[str, Any]]:
     try:
         import duckdb
+        import pandas as pd
     except ImportError:
         return []
     files = list((store.root / "canonical" / "dataset=option_chain").rglob("*.parquet"))
@@ -749,38 +750,117 @@ def _option_pulse(store: DatasetStore) -> list[dict[str, Any]]:
         return []
     connection = duckdb.connect()
     try:
-        rows = connection.execute(
+        frame = connection.execute(
             """
             WITH snapshots AS (
               SELECT *, max(effective_at) OVER (PARTITION BY symbol) AS latest_effective_at
               FROM read_parquet(?, union_by_name=true)
             )
-            SELECT symbol, max(effective_at) AS effective_at,
-              sum(CASE WHEN option_type='put' THEN open_interest ELSE 0 END) /
-                nullif(sum(CASE WHEN option_type='call' THEN open_interest ELSE 0 END), 0)
-                AS put_call_oi,
-              sum(CASE WHEN option_type='put' THEN volume ELSE 0 END) /
-                nullif(sum(CASE WHEN option_type='call' THEN volume ELSE 0 END), 0)
-                AS put_call_volume,
-              median(implied_volatility) AS median_iv
+            SELECT symbol, effective_at, expiration, option_type, strike,
+                   underlying_price, bid, ask, mid, quote_spread_ratio,
+                   volume, open_interest, implied_volatility
             FROM snapshots
             WHERE effective_at = latest_effective_at
-            GROUP BY symbol ORDER BY symbol
+            ORDER BY symbol, expiration, strike, option_type
             """,
             [str(store.root / "canonical" / "dataset=option_chain" / "**" / "*.parquet")],
-        ).fetchall()
-        return [
-            {
-                "symbol": row[0],
-                "effective_at": row[1],
-                "put_call_oi": _number(row[2]),
-                "put_call_volume": _number(row[3]),
-                "median_iv": _number(row[4]),
-            }
-            for row in rows
-        ]
+        ).df()
     finally:
         connection.close()
+    if frame.empty:
+        return []
+
+    result: list[dict[str, Any]] = []
+    for symbol, symbol_frame in frame.groupby("symbol", sort=True):
+        symbol_frame = symbol_frame.copy()
+        symbol_frame["mid_calc"] = symbol_frame["mid"]
+        missing_mid = symbol_frame["mid_calc"].isna()
+        symbol_frame.loc[missing_mid, "mid_calc"] = (
+            symbol_frame.loc[missing_mid, "bid"] + symbol_frame.loc[missing_mid, "ask"]
+        ) / 2
+        symbol_frame["spread_ratio"] = (
+            symbol_frame["ask"] - symbol_frame["bid"]
+        ) / symbol_frame["mid_calc"].replace(0, pd.NA)
+        spot = _number(symbol_frame["underlying_price"].dropna().iloc[0])
+        symbol_frame["near_atm"] = (
+            (symbol_frame["strike"] / spot - 1).abs() <= 0.05 if spot else False
+        )
+        spread_limit = symbol_frame["near_atm"].map({True: 0.05, False: 0.15})
+        activity = (symbol_frame["open_interest"].fillna(0) >= 100) | (
+            symbol_frame["volume"].fillna(0) >= 10
+        )
+        symbol_frame["liquid"] = (
+            (symbol_frame["bid"].fillna(0) > 0)
+            & (symbol_frame["ask"].fillna(0) > symbol_frame["bid"].fillna(0))
+            & (symbol_frame["spread_ratio"] <= spread_limit)
+            & activity
+        )
+        liquid_all = symbol_frame[symbol_frame["liquid"]]
+        call_oi = liquid_all.loc[
+            liquid_all["option_type"] == "call", "open_interest"
+        ].fillna(0).sum()
+        put_oi = liquid_all.loc[
+            liquid_all["option_type"] == "put", "open_interest"
+        ].fillna(0).sum()
+        call_volume = liquid_all.loc[
+            liquid_all["option_type"] == "call", "volume"
+        ].fillna(0).sum()
+        put_volume = liquid_all.loc[
+            liquid_all["option_type"] == "put", "volume"
+        ].fillna(0).sum()
+        expiries: list[dict[str, Any]] = []
+        snapshot_day = datetime.fromisoformat(
+            str(symbol_frame["effective_at"].iloc[0]).replace("Z", "+00:00")
+        ).date()
+        for expiration, chain in symbol_frame.groupby("expiration", sort=True):
+            liquid = chain[chain["liquid"]]
+            calls = liquid[liquid["option_type"] == "call"]
+            puts = liquid[liquid["option_type"] == "put"]
+            common = sorted(set(calls["strike"]) & set(puts["strike"]))
+            if not common:
+                continue
+            atm_strike = min(common, key=lambda value: abs(_number(value) - spot))
+            call = calls[calls["strike"] == atm_strike].iloc[0]
+            put = puts[puts["strike"] == atm_strike].iloc[0]
+            bid_cost = _number(call["bid"]) + _number(put["bid"])
+            mid_cost = _number(call["mid_calc"]) + _number(put["mid_calc"])
+            ask_cost = _number(call["ask"]) + _number(put["ask"])
+            expiries.append(
+                {
+                    "expiration": str(expiration),
+                    "dte": (date.fromisoformat(str(expiration)) - snapshot_day).days,
+                    "atm_strike": _number(atm_strike),
+                    "atm_call_iv": _number(call["implied_volatility"]),
+                    "atm_put_iv": _number(put["implied_volatility"]),
+                    "straddle_pct_bid": bid_cost / spot if spot else None,
+                    "straddle_pct_mid": mid_cost / spot if spot else None,
+                    "straddle_pct_ask": ask_cost / spot if spot else None,
+                    "liquid_contracts": int(len(liquid)),
+                    "contracts": int(len(chain)),
+                    "median_spread_ratio": _number(liquid["spread_ratio"].median()),
+                }
+            )
+        result.append(
+            {
+                "symbol": str(symbol),
+                "effective_at": str(symbol_frame["effective_at"].iloc[0]),
+                "spot": spot,
+                "contracts": int(len(symbol_frame)),
+                "liquid_contracts": int(len(liquid_all)),
+                "put_call_oi": _number(put_oi / call_oi) if call_oi else None,
+                "put_call_volume": (
+                    _number(put_volume / call_volume) if call_volume else None
+                ),
+                "median_iv": _number(liquid_all["implied_volatility"].median()),
+                "expirations": expiries,
+                "limitations": [
+                    "中间价不是成交保证；跨式同时给出bid/mid/ask边界",
+                    "尚无250个交易日IV历史，不判断期权贵或便宜",
+                    "未落库无风险利率与股息率前，不输出Greeks、RR25或BF25",
+                ],
+            }
+        )
+    return result
 
 
 def _pct(value: Any) -> str:
@@ -1074,7 +1154,7 @@ def build_market_brief(
         data_mode = "已完成日线（实时快照不可用）"
     macro_events = _macro_event_context(events, current)
     report = {
-        "schema_version": 5,
+        "schema_version": 6,
         "market": market,
         "market_name": MARKET_NAMES[market],
         "timezone": str(market_timezone),

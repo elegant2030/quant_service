@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
@@ -74,30 +75,77 @@ HttpGet = Callable[[str], dict[str, Any]]
 class SecCompanyFactsProvider:
     """Official no-key SEC API adapter with filing acceptance-time joins."""
 
-    def __init__(self, http_get: HttpGet | None = None, request_delay: float = 0.22) -> None:
+    def __init__(
+        self,
+        http_get: HttpGet | None = None,
+        request_delay: float = 0.22,
+        cik_resolver: Callable[[str], int] | None = None,
+    ) -> None:
         self.user_agent = os.environ.get(
-            "SEC_USER_AGENT", "QuantWorkbench/0.1 local-research (configure SEC_USER_AGENT)"
+            "SEC_USER_AGENT", "QuantWorkbench/0.1 contact@localhost"
         )
         self.http_get = http_get or self._get
         self.request_delay = request_delay
+        self.cik_resolver = cik_resolver or self._yfinance_cik
         self._ticker_map: dict[str, int] | None = None
 
     def _get(self, url: str) -> dict[str, Any]:
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": self.user_agent, "Accept": "application/json"},
+            headers={
+                "User-Agent": self.user_agent,
+                "Accept": "application/json",
+                # data.sec.gov currently rejects urllib's minimal default request,
+                # while accepting the same declared user agent with normal HTTP
+                # content-negotiation headers.  Keep the identity explicit and do
+                # not masquerade as a browser.
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+            },
         )
         with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-            return json.loads(response.read().decode("utf-8"))
+            payload = response.read()
+            if response.headers.get("Content-Encoding") == "gzip":
+                import gzip
+
+                payload = gzip.decompress(payload)
+            return json.loads(payload.decode("utf-8"))
 
     def ticker_map(self) -> dict[str, int]:
         if self._ticker_map is None:
-            payload = self.http_get(SEC_TICKERS_URL)
-            self._ticker_map = {
-                str(item["ticker"]).upper().replace(".", "-"): int(item["cik_str"])
-                for item in payload.values()
-            }
+            try:
+                payload = self.http_get(SEC_TICKERS_URL)
+                self._ticker_map = {
+                    str(item["ticker"]).upper().replace(".", "-"): int(item["cik_str"])
+                    for item in payload.values()
+                }
+            except Exception:
+                # Some networks block www.sec.gov while allowing data.sec.gov.
+                # Cache the failure and use yfinance only for identifier resolution;
+                # all financial facts and acceptance timestamps still come from SEC.
+                self._ticker_map = {}
         return self._ticker_map
+
+    @staticmethod
+    def _yfinance_cik(symbol: str) -> int:
+        import yfinance as yf
+
+        filings = list(yf.Ticker(symbol).get_sec_filings() or [])
+        for filing in filings:
+            candidates = [str(filing.get("edgarUrl") or "")]
+            candidates.extend(str(value) for value in (filing.get("exhibits") or {}).values())
+            for value in candidates:
+                match = re.search(r"(?:_|/)(\d{6,10})(?:/|$)", value)
+                if match:
+                    return int(match.group(1))
+        raise KeyError(f"SEC CIK not found in filing metadata for {symbol}")
+
+    def resolve_cik(self, symbol: str) -> tuple[int, str]:
+        normalized = symbol.upper().replace(".", "-")
+        cik = self.ticker_map().get(normalized)
+        if cik is not None:
+            return cik, "sec_company_tickers"
+        return self.cik_resolver(symbol), "yfinance_sec_filing_metadata"
 
     @staticmethod
     def _acceptance_by_accession(submissions: dict[str, Any]) -> dict[str, str]:
@@ -151,9 +199,7 @@ class SecCompanyFactsProvider:
         return _number(candidates[0].get("val"))
 
     def fetch(self, symbol: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        cik = self.ticker_map().get(symbol.upper().replace(".", "-"))
-        if cik is None:
-            raise KeyError(f"SEC CIK not found for {symbol}")
+        cik, mapping_source = self.resolve_cik(symbol)
         if self.request_delay:
             time.sleep(self.request_delay)
         submissions = self.http_get(f"{SEC_BASE}/submissions/CIK{cik:010d}.json")
@@ -222,7 +268,11 @@ class SecCompanyFactsProvider:
             "earnings_growth": None,
             "schema_version": SCHEMA_VERSION,
         }
-        return row, {"submissions": submissions, "companyfacts": companyfacts}
+        return row, {
+            "cik_mapping_source": mapping_source,
+            "submissions": submissions,
+            "companyfacts": companyfacts,
+        }
 
 
 class BaoStockFundamentalProvider:

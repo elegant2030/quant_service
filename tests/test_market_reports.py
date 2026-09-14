@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -14,6 +14,7 @@ from quant_workbench.reports.market_brief import (
     _apply_event_scores,
     _deliver_market_report,
     _macro_event_context,
+    _option_pulse,
     build_market_brief,
     due_report_stages,
     render_telegram,
@@ -116,6 +117,70 @@ class MacroEventTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_option_pulse_exposes_contract_liquidity_and_straddle_bounds(self) -> None:
+        common = {
+            "source": "fixture",
+            "source_symbol": "SPY",
+            "symbol": "SPY",
+            "market": "us",
+            "retrieved_at": "2026-09-14T20:15:00+00:00",
+            "effective_at": "2026-09-14T20:15:00+00:00",
+            "expiration": "2026-10-16",
+            "underlying_price": 100.0,
+            "volume": 50,
+            "open_interest": 500,
+            "schema_version": 1,
+        }
+        rows = [
+            {
+                **common,
+                "contract_symbol": "SPY-C-100",
+                "option_type": "call",
+                "strike": 100.0,
+                "bid": 4.9,
+                "ask": 5.1,
+                "mid": 5.0,
+                "quote_spread_ratio": 0.04,
+                "implied_volatility": 0.20,
+            },
+            {
+                **common,
+                "contract_symbol": "SPY-P-100",
+                "option_type": "put",
+                "strike": 100.0,
+                "bid": 3.9,
+                "ask": 4.1,
+                "mid": 4.0,
+                "quote_spread_ratio": 0.05,
+                "implied_volatility": 0.21,
+            },
+            {
+                **common,
+                "contract_symbol": "SPY-C-110",
+                "option_type": "call",
+                "strike": 110.0,
+                "bid": 0.0,
+                "ask": 1.0,
+                "mid": 0.5,
+                "quote_spread_ratio": 2.0,
+                "implied_volatility": 0.22,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            store = DatasetStore(directory)
+            store.write_rows(
+                "option_chain", "us", "fixture", date(2026, 9, 14), rows, "pulse"
+            )
+            pulse = _option_pulse(store)
+        self.assertEqual(len(pulse), 1)
+        self.assertEqual(pulse[0]["contracts"], 3)
+        self.assertEqual(pulse[0]["liquid_contracts"], 2)
+        self.assertEqual(len(pulse[0]["expirations"]), 1)
+        expiry = pulse[0]["expirations"][0]
+        self.assertAlmostEqual(expiry["straddle_pct_bid"], 0.088)
+        self.assertAlmostEqual(expiry["straddle_pct_mid"], 0.09)
+        self.assertAlmostEqual(expiry["straddle_pct_ask"], 0.092)
+
     def test_delivery_adds_document_without_repeating_legacy_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = DatasetStore(directory)

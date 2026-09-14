@@ -27,7 +27,9 @@
 - 宏观面：从市场代理 ETF 与全量标题识别 Fed/FOMC、利率和主要经济数据事件，单列
   `macro_events`；宏观事件只作市场风险背景，不机械加到某一只股票或所有股票分数。
   `likely/rumor` 会显示为“预期/预测”，只有确认材料才显示“已确认”。
-- 期权面：美股报告附 SPY/QQQ Put/Call 和中位 IV，仅作为市场级背景，不冒充个股信号。
+- 期权面：美股报告附 SPY/QQQ 最新逐到期日 DTE、严格流动性过滤、ATM Call/Put IV、
+  跨式 bid/mid/ask 成本边界、Put/Call 和中位 IV，仅作为市场级背景，不冒充个股信号。
+  没有无风险利率、股息率或 250 日 IV 历史时，不输出 Greeks、RR25/BF25 或贵贱判断。
 
 每个板块和每只股票都输出 `推荐依据` 与 `具体理由`，直接列明属于技术面、量价面
 、风险调整、基本面还是消息面，并展示对应数字或事件原文链接。基本面指标不足的股票
@@ -63,6 +65,9 @@ data/reports/daily/YYYY-MM-DD/all-skills-committee.{json,md}
 账号，固定调用七类专家视角，并要求对每个 Skill 输出 `applied`、`not_applicable` 或
 `blocked` 及证据。部署脚本会把仓库 `.claude/skills/` 同步到后台运行目录；因此报告中
 “使用全部 Skills”可以用清单、哈希和材料包哈希复核，不依赖模型自行声称。
+委员会证据包还包含 canonical 数据集的真实行数、证券数、起止日期、来源和期权报价
+覆盖，以及最新描述性策略研究原文及哈希。因此“已有但未送入模型”的数据不再被误报
+为完全缺失；仍未通过 PIT、样本外或交易约束审计的项目继续明确标为缺口。
 
 Telegram 使用运行时密钥文件：
 `/Users/lucky/Library/Application Support/QuantWorkbench/config/alerts.env`。

@@ -54,6 +54,47 @@ class SecProviderTests(unittest.TestCase):
         self.assertEqual(row["debt_to_assets"], 0.4)
         self.assertEqual(validate_fundamental_row(row), [])
         self.assertIn("companyfacts", raw)
+        self.assertEqual(raw["cik_mapping_source"], "sec_company_tickers")
+
+    def test_cik_mapping_falls_back_without_changing_fact_source(self) -> None:
+        accession = "0000320193-25-000079"
+        entry = {
+            "accn": accession,
+            "form": "10-Q",
+            "filed": "2025-08-01",
+            "end": "2025-06-28",
+        }
+
+        def http_get(url: str) -> dict[str, object]:
+            if url == SEC_TICKERS_URL:
+                raise OSError("blocked ticker directory")
+            if "submissions" in url:
+                return {
+                    "filings": {
+                        "recent": {
+                            "accessionNumber": [accession],
+                            "acceptanceDateTime": ["2025-08-01T16:31:02.000Z"],
+                            "filingDate": ["2025-08-01"],
+                        }
+                    }
+                }
+            return {
+                "facts": {
+                    "us-gaap": {
+                        "Revenues": {"units": {"USD": [{**entry, "val": 100.0}]}},
+                        "NetIncomeLoss": {
+                            "units": {"USD": [{**entry, "val": 20.0}]}
+                        },
+                    }
+                }
+            }
+
+        provider = SecCompanyFactsProvider(
+            http_get, request_delay=0, cik_resolver=lambda _symbol: 320193
+        )
+        row, raw = provider.fetch("AAPL")
+        self.assertEqual(row["source"], "sec_edgar")
+        self.assertEqual(raw["cik_mapping_source"], "yfinance_sec_filing_metadata")
 
 
 if __name__ == "__main__":

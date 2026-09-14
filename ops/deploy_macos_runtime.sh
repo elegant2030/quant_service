@@ -45,6 +45,13 @@ install -m 644 "$PROJECT_ROOT/data/cache/sector_probe/universe_cn.csv" \
 mkdir -p "$RUNTIME_ROOT/skills"
 rsync -a --delete "$PROJECT_ROOT/.claude/skills/" "$RUNTIME_ROOT/skills/"
 
+# Preserve the latest deterministic strategy study as committee evidence.  It is
+# explicitly labelled descriptive research by the report builder and is never used
+# as an execution instruction.
+mkdir -p "$RUNTIME_ROOT/data/research/strategy"
+find "$PROJECT_ROOT/reports" -maxdepth 1 -name 'STRATEGY_RESEARCH_*.md' -exec \
+  install -m 644 {} "$RUNTIME_ROOT/data/research/strategy/" \;
+
 "$RUNTIME_ROOT/venv/bin/quant-workbench" ops-init --root "$RUNTIME_ROOT/data"
 
 # Record what was deployed so health/latest.json can expose build_sha / deployed_at.

@@ -149,6 +149,8 @@ class DailyCommitteeTests(unittest.TestCase):
             )
         encoded = json.dumps(material, allow_nan=False)
         self.assertIn('"news_score": null', encoded)
+        self.assertIn("canonical_coverage", material)
+        self.assertIn("strategy_research", material)
 
 
 if __name__ == "__main__":
