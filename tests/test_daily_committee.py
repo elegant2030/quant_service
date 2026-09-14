@@ -184,6 +184,9 @@ class DailyCommitteeTests(unittest.TestCase):
         self.assertIn('"news_score": null', encoded)
         self.assertIn("canonical_coverage", material)
         self.assertIn("strategy_research", material)
+        self.assertTrue(
+            any("权威证据" in item for item in material["hard_limits"])
+        )
 
 
 if __name__ == "__main__":

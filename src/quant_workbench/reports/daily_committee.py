@@ -29,7 +29,7 @@ from quant_workbench.ops.alert import TelegramNotifier, load_alert_config
 from quant_workbench.store import DatasetStore
 
 NEW_YORK = ZoneInfo("America/New_York")
-PROMPT_VERSION = "daily_all_skills_committee_v2_evidence_pack"
+PROMPT_VERSION = "daily_all_skills_committee_v3_gap_semantics"
 EXPERT_ROLES = (
     "宏观与跨资产专家",
     "量价与多策略专家",
@@ -398,6 +398,8 @@ def build_committee_material(
             "LLM只解释确定性数字，不重算价格、收益、Greeks、仓位或限额",
             "每个skill必须输出一条审计；不适用也要给原因",
             "预期或预测不得表述为已经发生",
+            "canonical_coverage是数据存在性与覆盖数的权威证据；已被计数证明存在的字段不得写成数据缺失",
+            "必须区分数据库缺失、覆盖不完整和本次材料未提供逐行明细三种情况",
             "输出是研究候选，不是交易指令",
         ],
     })
