@@ -308,9 +308,9 @@ def command_run_due(args: argparse.Namespace) -> None:
             args.option_symbols,
             now,
         )
-        store.write_json("health/last-pipeline-run.json", report)
         if not args.no_alerts:
             report["alerts"] = notify_pipeline_report(store, report)
+        store.write_json("health/last-pipeline-run.json", report)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         if args.strict and report["status"] != "ok":
             raise SystemExit(2)

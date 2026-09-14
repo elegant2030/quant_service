@@ -12,7 +12,7 @@ done
 
 mkdir -p "$RUNTIME_ROOT/config" "$AGENT_ROOT"
 /opt/homebrew/bin/python3.14 -m venv "$RUNTIME_ROOT/venv"
-"$RUNTIME_ROOT/venv/bin/python" -m pip install "$PROJECT_ROOT[data,ops]"
+"$RUNTIME_ROOT/venv/bin/python" -m pip install "${PROJECT_ROOT}[data,ops]"
 
 install -m 644 "$PROJECT_ROOT/data/cache/sector_probe/universe_us.csv" \
   "$RUNTIME_ROOT/config/universe_us.csv"
