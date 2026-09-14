@@ -451,6 +451,8 @@ def command_market_report(args: argparse.Namespace) -> None:
             _parse_now(args.now),
             fetch_live=not args.no_live,
             send=not args.no_send,
+            generate_gpt=not args.no_gpt,
+            gpt_model=args.gpt_model,
         )
         print(
             json.dumps(
@@ -463,6 +465,9 @@ def command_market_report(args: argparse.Namespace) -> None:
                     "data_mode": report["data_mode"],
                     "json_path": str(artifacts.json_path),
                     "markdown_path": str(artifacts.markdown_path),
+                    "gpt_status": report["gpt_analysis"]["status"],
+                    "gpt_json_path": str(artifacts.gpt_json_path),
+                    "gpt_markdown_path": str(artifacts.gpt_markdown_path),
                     "sent": artifacts.sent,
                     "send_error": artifacts.send_error,
                 },
@@ -484,6 +489,8 @@ def command_market_reports_due(args: argparse.Namespace) -> None:
             _parse_now(args.now),
             fetch_live=not args.no_live,
             send=not args.no_send,
+            generate_gpt=not args.no_gpt,
+            gpt_model=args.gpt_model,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if args.strict and result["status"] != "ok":
@@ -639,6 +646,8 @@ def build_parser() -> argparse.ArgumentParser:
     market_report.add_argument("--now", help="测试用ISO时间；无时区时按UTC")
     market_report.add_argument("--no-live", action="store_true", help="只使用已完成日线")
     market_report.add_argument("--no-send", action="store_true", help="只保存本地，不推送")
+    market_report.add_argument("--no-gpt", action="store_true", help="不调用 GPT 解释层")
+    market_report.add_argument("--gpt-model", help="覆盖 OPENAI_REPORT_MODEL")
     market_report.add_argument("--strict", action="store_true")
     market_report.set_defaults(func=command_market_report)
 
@@ -649,6 +658,8 @@ def build_parser() -> argparse.ArgumentParser:
     reports_due.add_argument("--now", help="测试用ISO时间；无时区时按UTC")
     reports_due.add_argument("--no-live", action="store_true", help="只使用已完成日线")
     reports_due.add_argument("--no-send", action="store_true", help="只保存本地，不推送")
+    reports_due.add_argument("--no-gpt", action="store_true", help="不调用 GPT 解释层")
+    reports_due.add_argument("--gpt-model", help="覆盖 OPENAI_REPORT_MODEL")
     reports_due.add_argument("--strict", action="store_true")
     reports_due.set_defaults(func=command_market_reports_due)
 

@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from quant_workbench.ai.market_report import (
+    MarketReportGPTClient,
+    generate_gpt_analysis,
+    render_gpt_markdown,
+)
 from quant_workbench.ops.alert import TelegramNotifier, load_alert_config
 from quant_workbench.store import DatasetStore
 
@@ -47,6 +52,8 @@ class ReportArtifacts:
     markdown_path: Path
     sent: bool
     send_error: str | None
+    gpt_json_path: Path | None = None
+    gpt_markdown_path: Path | None = None
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -726,7 +733,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         ),
         (
             f"> 消息面已纳入近14日可追溯事件，覆盖 {news_symbols} 只股票；"
-            "当前为确定性规则评分，未调用 LLM。"
+            "评分仍由确定性规则完成，GPT 只负责解释。"
             if news_symbols
             else "> 近14日没有可用事件，本版不会冒充消息面结论。"
         ),
@@ -777,6 +784,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
         ]
     )
+    if "gpt_analysis" in report:
+        lines.extend(["", "---", "", render_gpt_markdown(report["gpt_analysis"], report)])
     return "\n".join(lines)
 
 
@@ -810,6 +819,19 @@ def render_telegram(report: dict[str, Any]) -> str:
             for row in report["options"]
         )
         lines.extend(["", f"期权温度: {pulse}"])
+    gpt = report.get("gpt_analysis") or {}
+    analysis = gpt.get("analysis") or {}
+    if gpt.get("status") == "completed" and analysis:
+        lines.extend(["", f"GPT解读({gpt.get('model')}): {analysis['executive_summary']}"])
+        priorities = [
+            f"{item['symbol']}({item['research_priority']})"
+            for item in analysis.get("stock_reports", [])
+            if item.get("research_priority") == "高"
+        ][:5]
+        if priorities:
+            lines.append("优先复核: " + " / ".join(priorities))
+    elif gpt.get("status") in {"disabled", "failed"}:
+        lines.extend(["", f"GPT解读: {gpt['status']}（确定性报告不受影响）"])
     lines.extend(["", "研究候选，不是交易指令；详版已保存本地。"])
     return "\n".join(lines)
 
@@ -822,6 +844,9 @@ def build_market_brief(
     fetch_live: bool = True,
     live_fetcher: Callable[[list[str]], dict[str, Any]] | None = None,
     send: bool = True,
+    generate_gpt: bool = True,
+    gpt_model: str | None = None,
+    gpt_client: MarketReportGPTClient | None = None,
 ) -> tuple[dict[str, Any], ReportArtifacts]:
     if market not in REPORT_STAGES:
         raise ValueError(f"unsupported market: {market}")
@@ -889,7 +914,7 @@ def build_market_brief(
     else:
         data_mode = "已完成日线（实时快照不可用）"
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "market": market,
         "market_name": MARKET_NAMES[market],
         "timezone": str(market_timezone),
@@ -930,7 +955,11 @@ def build_market_brief(
                 "method": "deterministic_title_summary_keywords_v1",
             },
             "options": "market_level_only" if market == "us" else "not_applicable",
-            "llm": "not_called_event_scores_are_deterministic",
+            "llm": {
+                "role": "interpretation_only",
+                "ranking_and_scores": "deterministic",
+                "status": "pending" if generate_gpt else "disabled_by_command",
+            },
         },
         "live_snapshot": {
             "retrieved_at": (usable_live or {}).get("retrieved_at"),
@@ -940,6 +969,27 @@ def build_market_brief(
         "disclaimer": "量化研究候选，不是交易指令。",
     }
     base = Path("reports") / "market" / market / report["report_date"] / stage
+    if generate_gpt:
+        report["gpt_analysis"] = generate_gpt_analysis(
+            report, store.root, model=gpt_model, client=gpt_client
+        )
+    else:
+        report["gpt_analysis"] = {
+            "status": "disabled",
+            "reason": "disabled by command; GPT was not called",
+            "model": gpt_model,
+            "prompt_version": None,
+            "material_sha256": None,
+            "analysis": None,
+        }
+    report["evidence_coverage"]["llm"] = {
+        "role": "interpretation_only",
+        "ranking_and_scores": "deterministic",
+        "status": report["gpt_analysis"]["status"],
+        "model": report["gpt_analysis"].get("model"),
+        "prompt_version": report["gpt_analysis"].get("prompt_version"),
+        "material_sha256": report["gpt_analysis"].get("material_sha256"),
+    }
     sent = False
     send_error: str | None = None
     if send:
@@ -954,7 +1004,21 @@ def build_market_brief(
     }
     json_path = store.write_json(base.with_suffix(".json"), report)
     markdown_path = store.write_text(base.with_suffix(".md"), render_markdown(report))
-    artifacts = ReportArtifacts(market, stage, json_path, markdown_path, sent, send_error)
+    gpt_base = base.with_name(f"{stage}-gpt")
+    gpt_json_path = store.write_json(gpt_base.with_suffix(".json"), report["gpt_analysis"])
+    gpt_markdown_path = store.write_text(
+        gpt_base.with_suffix(".md"), render_gpt_markdown(report["gpt_analysis"], report)
+    )
+    artifacts = ReportArtifacts(
+        market,
+        stage,
+        json_path,
+        markdown_path,
+        sent,
+        send_error,
+        gpt_json_path,
+        gpt_markdown_path,
+    )
     return report, artifacts
 
 
@@ -963,6 +1027,8 @@ def run_due_market_briefs(
     now: datetime | None = None,
     fetch_live: bool = True,
     send: bool = True,
+    generate_gpt: bool = True,
+    gpt_model: str | None = None,
 ) -> dict[str, Any]:
     """Generate every due, missing report so wake-from-sleep runs catch up safely."""
     current = now or datetime.now(timezone.utc)
@@ -1046,6 +1112,8 @@ def run_due_market_briefs(
                     fetch_live=fetch_live,
                     live_fetcher=fetch_once if fetch_live else None,
                     send=send,
+                    generate_gpt=generate_gpt,
+                    gpt_model=gpt_model,
                 )
                 output["generated"].append(
                     {
@@ -1053,6 +1121,9 @@ def run_due_market_briefs(
                         "stage": stage,
                         "json_path": str(artifacts.json_path),
                         "markdown_path": str(artifacts.markdown_path),
+                        "gpt_status": report["gpt_analysis"]["status"],
+                        "gpt_json_path": str(artifacts.gpt_json_path),
+                        "gpt_markdown_path": str(artifacts.gpt_markdown_path),
                         "sent": artifacts.sent,
                         "send_error": artifacts.send_error,
                         "sectors": len(report["sectors"]),

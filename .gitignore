@@ -4,6 +4,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 .env
+config/openai.env
 dist/
 build/
 data/cache/
