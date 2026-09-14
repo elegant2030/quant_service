@@ -202,7 +202,7 @@ LaunchAgent  pipeline / watchdog / backup
 - `backtest/` 固定单边换手 Σ|Δw|/2；报告模板含基准行、超额、α/β、状态标签（描述性/样本外/可交易候选）
 - 验收：重生成 `reports/STRATEGY_RESEARCH_<新日期>.md`，走 qw-backtest-audit
 
-### T5 告警与版本可见（审查 3.3/3.4）— 代码已完成 2026-09-13，待用户配置凭据后验收
+### T5 告警与版本可见（审查 3.3/3.4）— 已完成并验收 2026-09-13（后台已部署，alerts.env 已配置）
 - `ops/alert.py` Telegram；watchdog 在 strict 失败、quarantine 新增、连续 2 次 exit≠0 时推送，每日心跳
 - 打包写入 git sha；`health/latest.json` 输出 `build_sha`、`deployed_at`
 - 验收：人为制造一次校验失败，收到告警
@@ -272,4 +272,5 @@ launchctl print gui/501/com.quantworkbench.pipeline | grep -E 'state|last exit|r
 - 基线提交 `02588f0`，标签 `mvp-2026-09-13`，远端 https://github.com/elegant2030/quant_service（公开仓库）。
 - `.claude/skills/*`（24 个）、`AGENTS.md`、`docs/PROJECT_REVIEW_2026-09-13.md`、`docs/FRAMEWORK_INTEGRATION.md` 已在仓库中。
 - 已核对为真：单测通过；选择性 ruff 通过；仓库无 `.env`、无密钥字符串；三个 LaunchAgent 已加载且最近 exit 0；后台 health `status=ok`，美股/A 股水位 2026-09-11，quarantine 为空。
-- T5 告警代码已合入但后台**尚未部署**，也未配置 `alerts.env`；部署前 `health/latest.json` 没有 `build_sha` 字段。
+- T5 已部署验收：后台 `health/latest.json` 带 `build_sha`、`deployed_at`、`alerts`；Telegram 测试消息、错误告警、去重、恢复消息均已实收。
+- 部署脚本现在会强制重装包并比对源码，pip 因版本号不变而跳过安装的漂移问题已修（2026-09-13）。
