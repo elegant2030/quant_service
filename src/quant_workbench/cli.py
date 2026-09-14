@@ -10,6 +10,7 @@ from quant_workbench.ai.openai_client import OpenAIResearchClient
 from quant_workbench.backtest.engine import BacktestEngine
 from quant_workbench.core.models import AssetClass, Bar, Currency, Exchange, Instrument
 from quant_workbench.derivatives.options import OptionType, black_scholes, implied_volatility
+from quant_workbench.fundamentals.pit import ingest_fundamentals, run_due_fundamentals
 from quant_workbench.jobs.ingestion import (
     ingest_cached_bars,
     ingest_incremental_bars,
@@ -228,6 +229,39 @@ def command_ingest_daily(args: argparse.Namespace) -> None:
         state.close()
 
 
+def command_ingest_fundamentals(args: argparse.Namespace) -> None:
+    store, state = _open_stores(args.root)
+    try:
+        result = ingest_fundamentals(
+            store,
+            state,
+            args.market,
+            Path(args.universe or f"data/cache/sector_probe/universe_{args.market}.csv"),
+            date.fromisoformat(args.run_date) if args.run_date else date.today(),
+            symbols=args.symbols,
+            limit=args.limit,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        state.close()
+
+
+def command_fundamentals_due(args: argparse.Namespace) -> None:
+    store, state = _open_stores(args.root)
+    try:
+        result = run_due_fundamentals(
+            store,
+            state,
+            Path(args.universe_directory),
+            _parse_now(args.now),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.strict and result["status"] != "ok":
+            raise SystemExit(2)
+    finally:
+        state.close()
+
+
 def command_ops_status(args: argparse.Namespace) -> None:
     store, state = _open_stores(args.root)
     try:
@@ -431,6 +465,28 @@ def build_parser() -> argparse.ArgumentParser:
     daily.add_argument("--as-of", help="更新到该日期之前的最新交易日，默认今天")
     daily.add_argument("--minimum-coverage", type=float, default=0.98)
     daily.set_defaults(func=command_ingest_daily)
+
+    fundamentals = subparsers.add_parser(
+        "ingest-fundamentals", help="采集带披露时间的美股/A股季度基本面"
+    )
+    fundamentals.add_argument("--market", choices=["us", "cn"], required=True)
+    fundamentals.add_argument("--root", default=str(DEFAULT_LAKE))
+    fundamentals.add_argument("--universe")
+    fundamentals.add_argument("--symbols", nargs="+")
+    fundamentals.add_argument("--limit", type=int)
+    fundamentals.add_argument("--run-date")
+    fundamentals.set_defaults(func=command_ingest_fundamentals)
+
+    fundamentals_due = subparsers.add_parser(
+        "fundamentals-due", help="按市场收盘时间刷新季度基本面"
+    )
+    fundamentals_due.add_argument("--root", default=str(DEFAULT_LAKE))
+    fundamentals_due.add_argument(
+        "--universe-directory", default="data/cache/sector_probe"
+    )
+    fundamentals_due.add_argument("--now", help="测试用ISO时间；无时区时按UTC")
+    fundamentals_due.add_argument("--strict", action="store_true")
+    fundamentals_due.set_defaults(func=command_fundamentals_due)
 
     option_snapshot = subparsers.add_parser("snapshot-options", help="保存研究用美股期权链每日快照")
     option_snapshot.add_argument("--symbols", nargs="+", default=["SPY", "QQQ"])

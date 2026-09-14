@@ -93,11 +93,33 @@ class ReportTests(unittest.TestCase):
             ],
             "errors": [],
         }
+        fundamentals = pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "period_end": "2026-06-30",
+                    "effective_at": "2026-08-01T20:30:00+00:00",
+                    "document_id": f"filing-{symbol}",
+                    "roe": 0.15,
+                    "gross_margin": 0.40,
+                    "net_margin": 0.18,
+                    "cash_conversion": 1.1,
+                    "revenue_growth": 0.12,
+                    "earnings_growth": 0.10,
+                    "debt_to_assets": 0.35,
+                }
+                for symbol in frame.loc[frame["market"] == "us", "symbol"].unique()
+            ]
+        )
         with tempfile.TemporaryDirectory() as directory:
             store = DatasetStore(directory)
             with (
                 patch("quant_workbench.reports.market_brief._load_daily_bars", return_value=frame),
                 patch("quant_workbench.reports.market_brief._option_pulse", return_value=[]),
+                patch(
+                    "quant_workbench.reports.market_brief._load_latest_fundamentals",
+                    return_value=fundamentals,
+                ),
             ):
                 report, artifacts = build_market_brief(
                     store,
@@ -114,7 +136,8 @@ class ReportTests(unittest.TestCase):
             self.assertIn("美股实时快照(36)", report["data_mode"])
             self.assertIn("候选股票 TOP15", render_telegram(report))
             self.assertIn("技术面", report["stocks"][0]["reason"]["basis"])
-            self.assertIn("未纳入", report["stocks"][0]["reason"]["fundamental"])
+            self.assertIn("基本面", report["stocks"][0]["reason"]["basis"])
+            self.assertIn("已纳入", report["stocks"][0]["reason"]["fundamental"])
             payload = json.loads(artifacts.json_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["market"], "us")
             self.assertEqual(payload["stage"], "midday")

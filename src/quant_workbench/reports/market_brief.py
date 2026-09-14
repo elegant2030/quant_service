@@ -262,7 +262,108 @@ def _cross_section(bars: Any, live: dict[str, Any] | None) -> Any:
             1 - cross.loc[indexes, "volatility_20"].rank(pct=True)
         ) * 0.10
     cross["score"] *= 100
+    cross["technical_score"] = cross["score"]
     return cross
+
+
+def _load_latest_fundamentals(
+    store: DatasetStore, market: str, as_of: datetime
+) -> Any | None:
+    import json
+
+    import pandas as pd
+
+    try:
+        import duckdb
+    except ImportError:
+        return None
+    root = store.root / "canonical" / "dataset=fundamental_metrics" / f"market={market}"
+    canonical = None
+    if list(root.rglob("*.parquet")):
+        connection = duckdb.connect()
+        try:
+            canonical = connection.execute(
+                """
+                SELECT * EXCLUDE(row_number) FROM (
+                  SELECT *, row_number() OVER (
+                    PARTITION BY symbol ORDER BY effective_at DESC, retrieved_at DESC
+                  ) AS row_number
+                  FROM read_parquet(?, union_by_name=true)
+                  WHERE effective_at <= ?
+                ) WHERE row_number = 1
+                """,
+                [str(root / "**" / "*.parquet"), as_of.astimezone(timezone.utc).isoformat()],
+            ).df()
+        finally:
+            connection.close()
+    research_rows: list[dict[str, Any]] = []
+    research_root = store.root / "research" / "fundamentals" / f"market={market}"
+    for path in research_root.glob("symbol=*/latest.json"):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+            effective = datetime.fromisoformat(str(row["effective_at"]).replace("Z", "+00:00"))
+            if effective <= as_of.astimezone(timezone.utc):
+                research_rows.append(row)
+        except (OSError, ValueError, KeyError):
+            continue
+    research = pd.DataFrame(research_rows)
+    if canonical is None or canonical.empty:
+        return research if not research.empty else None
+    if research.empty:
+        return canonical
+    missing = research[~research["symbol"].isin(set(canonical["symbol"]))]
+    return pd.concat([canonical, missing], ignore_index=True, sort=False)
+
+
+def _apply_fundamental_scores(cross: Any, fundamentals: Any | None) -> Any:
+    import pandas as pd
+
+    metric_names = [
+        "roe",
+        "gross_margin",
+        "net_margin",
+        "cash_conversion",
+        "revenue_growth",
+        "earnings_growth",
+        "debt_to_assets",
+    ]
+    if fundamentals is None or fundamentals.empty:
+        for name in metric_names:
+            cross[name] = pd.NA
+        for name in ("period_end", "effective_at", "document_id", "source", "evidence_quality"):
+            cross[name] = pd.NA
+        cross["fundamental_score"] = pd.NA
+        cross["fundamental_coverage"] = 0
+        return cross
+    available = [
+        "symbol",
+        "period_end",
+        "effective_at",
+        "document_id",
+        "source",
+        "evidence_quality",
+        *metric_names,
+    ]
+    available = [column for column in available if column in fundamentals.columns]
+    merged = cross.merge(fundamentals[available], on="symbol", how="left")
+    for name in ("period_end", "effective_at", "document_id", "source", "evidence_quality"):
+        if name not in merged.columns:
+            merged[name] = pd.NA
+    merged["fundamental_coverage"] = merged[metric_names].notna().sum(axis=1)
+    components = []
+    for name in metric_names:
+        values = pd.to_numeric(merged[name], errors="coerce")
+        rank = values.rank(pct=True)
+        if name == "debt_to_assets":
+            rank = 1 - rank
+        components.append(rank)
+    merged["fundamental_score"] = pd.concat(components, axis=1).mean(axis=1) * 100
+    eligible = merged["fundamental_coverage"] >= 2
+    merged.loc[eligible, "score"] = (
+        merged.loc[eligible, "technical_score"] * 0.75
+        + merged.loc[eligible, "fundamental_score"] * 0.25
+    )
+    return merged
 
 
 def _stock_reason(row: dict[str, Any]) -> dict[str, Any]:
@@ -285,13 +386,38 @@ def _stock_reason(row: dict[str, Any]) -> dict[str, Any]:
     if _number(row["volatility_20"]) < 0.30:
         reason_types.append("风险调整")
         evidence.append(f"20日年化波动{_number(row['volatility_20']) * 100:.0f}%")
+    fundamental_coverage = int(_number(row.get("fundamental_coverage")))
+    if fundamental_coverage >= 2:
+        reason_types.append("基本面")
+        fundamental_bits = []
+        if _number(row.get("roe"), float("nan")) == _number(
+            row.get("roe"), float("nan")
+        ):
+            fundamental_bits.append(f"ROE {_number(row['roe']) * 100:.1f}%")
+        if _number(row.get("earnings_growth"), float("nan")) == _number(
+            row.get("earnings_growth"), float("nan")
+        ):
+            fundamental_bits.append(f"净利润同比 {_pct(row['earnings_growth'])}")
+        if _number(row.get("net_margin"), float("nan")) == _number(
+            row.get("net_margin"), float("nan")
+        ):
+            fundamental_bits.append(f"净利率 {_number(row['net_margin']) * 100:.1f}%")
+        evidence.append(
+            "基本面" + ("、".join(fundamental_bits[:2]) if fundamental_bits else "横截面得分有效")
+        )
     if not reason_types:
         reason_types.append("相对强度")
         evidence.append("市场内综合排名靠前")
     return {
         "basis": reason_types,
         "summary": "；".join(evidence[:3]),
-        "fundamental": "未纳入：尚无可审计的PIT财务数据",
+        "fundamental": (
+            f"已纳入{'（研究快照）' if row.get('source') == 'yfinance_research' else ''}："
+            f"{fundamental_coverage}项指标，得分"
+            f"{_number(row.get('fundamental_score')):.1f}"
+            if fundamental_coverage >= 2
+            else "未纳入：该股票尚无足够的PIT财务数据"
+        ),
         "news": "未纳入：尚无带发布时间与原文证据的事件数据",
     }
 
@@ -300,13 +426,17 @@ def _sector_reason(row: dict[str, Any]) -> dict[str, Any]:
     basis = ["技术面"]
     if abs(_number(row["return_1"])) >= 0.01:
         basis.append("量价面")
+    fundamental_members = int(_number(row.get("fundamental_members")))
+    if fundamental_members:
+        basis.append("基本面")
     return {
         "basis": basis,
         "summary": (
             f"板块当日{_pct(row['return_1'])}、20日{_pct(row['return_20'])}，"
             f"MA20上方占比{_number(row['breadth_20']) * 100:.0f}%"
+            + (f"，{fundamental_members}只含基本面" if fundamental_members else "")
         ),
-        "fundamental": "未纳入",
+        "fundamental": "已纳入" if fundamental_members else "未纳入",
         "news": "未纳入",
     }
 
@@ -321,6 +451,11 @@ def _select_rankings(cross: Any) -> tuple[list[dict[str, Any]], list[dict[str, A
             breadth_60=("above_ma60", "mean"),
             return_1=("return_1", "mean"),
             return_20=("return_20", "mean"),
+            fundamental_members=(
+                "fundamental_coverage",
+                lambda values: int((values >= 2).sum()),
+            ),
+            fundamental_score=("fundamental_score", "mean"),
         )
         .reset_index()
     )
@@ -371,6 +506,21 @@ def _select_rankings(cross: Any) -> tuple[list[dict[str, Any]], list[dict[str, A
         "above_ma60",
         "score",
         "live_used",
+        "technical_score",
+        "fundamental_score",
+        "fundamental_coverage",
+        "period_end",
+        "effective_at",
+        "document_id",
+        "source",
+        "evidence_quality",
+        "roe",
+        "gross_margin",
+        "net_margin",
+        "cash_conversion",
+        "revenue_growth",
+        "earnings_growth",
+        "debt_to_assets",
     ]
     sector_rows = top_sectors.to_dict(orient="records")
     stock_rows = cross.loc[selected_indexes, columns].to_dict(orient="records")
@@ -430,6 +580,7 @@ def _pct(value: Any) -> str:
 
 
 def render_markdown(report: dict[str, Any]) -> str:
+    fundamental_symbols = report["evidence_coverage"]["fundamental"]["symbols"]
     lines = [
         f"# Quant Workbench {report['market_name']}{report['stage_name']}报告",
         "",
@@ -438,8 +589,12 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "> 这是量化研究候选清单，不是交易指令。热度分数衡量相对趋势、量能、突破与风险，"
         "不代表未来收益。",
-        "> 当前尚未接入可审计的 PIT 财务与新闻事件数据，因此本版推荐依据是技术/量价/"
-        "风险调整，不会冒充基本面或消息面结论。",
+        (
+            f"> 基本面已对 {fundamental_symbols} 只股票参与评分；其余股票会逐只标明数据不足。"
+            if fundamental_symbols
+            else "> 当前尚无可用的 PIT 财务数据，本版不会冒充基本面结论。"
+        ),
+        "> 新闻事件数据尚未接入，因此消息面仍不参与评分。",
         "",
         "## 热度板块 TOP 5",
         "",
@@ -465,7 +620,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(
             f"| {rank} | {row['symbol']} | {row['name']} | {row['sector']} | "
             f"{_number(row['score']):.1f} | {'+'.join(row['reason']['basis'])} | "
-            f"{row['reason']['summary']} | 基本面、消息面未纳入 |"
+            f"{row['reason']['summary']} | {row['reason']['fundamental']}；消息面未纳入 |"
         )
     if report["options"]:
         lines.extend(["", "## 期权温度（市场级）", ""])
@@ -489,11 +644,12 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 
 def render_telegram(report: dict[str, Any]) -> str:
+    fundamental_symbols = report["evidence_coverage"]["fundamental"]["symbols"]
     lines = [
         f"Quant Workbench {report['market_name']}{report['stage_name']} | "
         f"{report['report_date']} {report['timezone']}",
         f"模式: {report['data_mode']} | 日线 {report['data_as_of']}",
-        "依据: 技术/量价/风险调整；基本面与消息面当前未纳入",
+        f"依据: 技术/量价/风险调整 + 基本面({fundamental_symbols}只)；消息面未纳入",
         "",
         "热度板块 TOP5",
     ]
@@ -580,6 +736,8 @@ def build_market_brief(
                 f"ignored {stale_rows} stale or invalid intraday rows",
             ]
     cross = _cross_section(bars, usable_live)
+    fundamentals = _load_latest_fundamentals(store, market, current)
+    cross = _apply_fundamental_scores(cross, fundamentals)
     sectors, stocks = _select_rankings(cross)
     data_as_of = str(bars["session_date"].max())
     live_count = len((usable_live or {}).get("rows") or [])
@@ -615,7 +773,11 @@ def build_market_brief(
         "options": _option_pulse(store) if market == "us" else [],
         "evidence_coverage": {
             "technical_and_price_volume": "included",
-            "fundamental": "not_available_no_pit_dataset",
+            "fundamental": {
+                "status": "included_when_available",
+                "symbols": int((cross["fundamental_coverage"] >= 2).sum()),
+                "weight": 0.25,
+            },
             "news": "not_available_no_auditable_event_dataset",
             "options": "market_level_only" if market == "us" else "not_applicable",
             "llm": "not_called",
