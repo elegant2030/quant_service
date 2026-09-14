@@ -16,6 +16,11 @@ from quant_workbench.jobs.ingestion import (
     snapshot_options,
 )
 from quant_workbench.jobs.orchestrator import run_due_jobs
+from quant_workbench.ops.alert import (
+    notify_health_report,
+    notify_pipeline_report,
+    send_test_message,
+)
 from quant_workbench.ops.backup import create_backup_snapshot, verify_backup_snapshot
 from quant_workbench.ops.health import build_health_report, write_health_report
 from quant_workbench.store import DatasetStore, StateStore
@@ -281,6 +286,8 @@ def command_watchdog(args: argparse.Namespace) -> None:
         )
         history_path = write_health_report(store, report)
         report["history_path"] = str(history_path)
+        if not args.no_alerts:
+            report["alerts"] = notify_health_report(store, state, report)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         if args.strict and report["status"] == "error":
             raise SystemExit(2)
@@ -302,8 +309,21 @@ def command_run_due(args: argparse.Namespace) -> None:
             now,
         )
         store.write_json("health/last-pipeline-run.json", report)
+        if not args.no_alerts:
+            report["alerts"] = notify_pipeline_report(store, report)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         if args.strict and report["status"] != "ok":
+            raise SystemExit(2)
+    finally:
+        state.close()
+
+
+def command_alert_test(args: argparse.Namespace) -> None:
+    store, state = _open_stores(args.root)
+    try:
+        result = send_test_message(store, args.text)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result["ok"]:
             raise SystemExit(2)
     finally:
         state.close()
@@ -380,7 +400,13 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog.add_argument("--minimum-coverage", type=float, default=0.98)
     watchdog.add_argument("--full", action="store_true", help="同时验证全部 Parquet 校验和")
     watchdog.add_argument("--strict", action="store_true", help="发现错误时返回非零退出码")
+    watchdog.add_argument("--no-alerts", action="store_true", help="不推送 Telegram 告警")
     watchdog.set_defaults(func=command_watchdog)
+
+    alert_test = subparsers.add_parser("alert-test", help="向 Telegram 发送一条测试告警")
+    alert_test.add_argument("--root", default=str(DEFAULT_LAKE))
+    alert_test.add_argument("--text", default=None, help="自定义消息内容")
+    alert_test.set_defaults(func=command_alert_test)
 
     run_due = subparsers.add_parser("run-due", help="按各市场已完成交易日运行到期作业")
     run_due.add_argument("--root", default=str(DEFAULT_LAKE))
@@ -390,6 +416,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_due.add_argument("--option-symbols", nargs="+", default=["SPY", "QQQ"])
     run_due.add_argument("--now", help="测试用ISO时间；无时区时按UTC")
     run_due.add_argument("--strict", action="store_true")
+    run_due.add_argument("--no-alerts", action="store_true", help="不推送 Telegram 告警")
     run_due.set_defaults(func=command_run_due)
     return parser
 

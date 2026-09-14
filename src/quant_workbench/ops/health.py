@@ -34,6 +34,27 @@ def _manifest_checks(store: DatasetStore, verify_checksums: bool) -> tuple[list[
     return errors, checked
 
 
+def read_build_info(store: DatasetStore) -> dict[str, Any]:
+    """``<runtime>/build-info.json`` is written by ops/deploy_macos_runtime.sh."""
+    path = store.root.parent / "build-info.json"
+    if not path.is_file():
+        return {"build_sha": None, "deployed_at": None, "build_info_path": str(path)}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {
+            "build_sha": None,
+            "deployed_at": None,
+            "build_info_path": str(path),
+            "build_info_error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "build_sha": payload.get("build_sha"),
+        "deployed_at": payload.get("deployed_at"),
+        "build_info_path": str(path),
+    }
+
+
 def build_health_report(
     store: DatasetStore,
     state: StateStore,
@@ -108,10 +129,13 @@ def build_health_report(
 
     manifest_errors, manifests_checked = _manifest_checks(store, verify_checksums)
     errors.extend(manifest_errors)
+    build_info = read_build_info(store)
     status = "error" if errors else "degraded" if warnings else "ok"
     return {
         "status": status,
         "checked_at": current.astimezone(timezone.utc).isoformat(),
+        "build_sha": build_info["build_sha"],
+        "deployed_at": build_info["deployed_at"],
         "errors": errors,
         "warnings": warnings,
         "sqlite_integrity": database_integrity,

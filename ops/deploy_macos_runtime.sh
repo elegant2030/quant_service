@@ -21,6 +21,19 @@ install -m 644 "$PROJECT_ROOT/data/cache/sector_probe/universe_cn.csv" \
 
 "$RUNTIME_ROOT/venv/bin/quant-workbench" ops-init --root "$RUNTIME_ROOT/data"
 
+# Record what was deployed so health/latest.json can expose build_sha / deployed_at.
+BUILD_SHA="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null)" ]]; then
+  BUILD_SHA="${BUILD_SHA}-dirty"
+fi
+printf '{"build_sha": "%s", "deployed_at": "%s"}\n' "$BUILD_SHA" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RUNTIME_ROOT/build-info.json"
+
+# Telegram credentials live only in the runtime; never copied from or into the repo.
+if [[ ! -f "$RUNTIME_ROOT/config/alerts.env" ]]; then
+  echo "note: $RUNTIME_ROOT/config/alerts.env not found; alerts stay disabled (see docs/ALERTING.md)"
+fi
+
 for label in pipeline watchdog backup; do
   install -m 644 "$PROJECT_ROOT/ops/launchd/com.quantworkbench.$label.plist" \
     "$AGENT_ROOT/com.quantworkbench.$label.plist"
