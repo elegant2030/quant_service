@@ -111,6 +111,25 @@ class ReportTests(unittest.TestCase):
                 for symbol in frame.loc[frame["market"] == "us", "symbol"].unique()
             ]
         )
+        events = pd.DataFrame(
+            [
+                {
+                    "event_id": f"news-{symbol}",
+                    "symbol": symbol,
+                    "source": "yfinance_news",
+                    "title": f"{symbol} raises guidance",
+                    "url": f"https://example.com/{symbol}",
+                    "publisher": "Fixture Wire",
+                    "published_at": "2026-09-14T14:00:00+00:00",
+                    "effective_at": "2026-09-14T14:00:00+00:00",
+                    "direction": 1,
+                    "confidence": 0.7,
+                    "subtype": "guidance_change",
+                    "scoring_method": "deterministic_title_summary_keywords_v1",
+                }
+                for symbol in frame.loc[frame["market"] == "us", "symbol"].unique()
+            ]
+        )
         with tempfile.TemporaryDirectory() as directory:
             store = DatasetStore(directory)
             with (
@@ -119,6 +138,10 @@ class ReportTests(unittest.TestCase):
                 patch(
                     "quant_workbench.reports.market_brief._load_latest_fundamentals",
                     return_value=fundamentals,
+                ),
+                patch(
+                    "quant_workbench.reports.market_brief._load_recent_events",
+                    return_value=events,
                 ),
             ):
                 report, artifacts = build_market_brief(
@@ -137,7 +160,9 @@ class ReportTests(unittest.TestCase):
             self.assertIn("候选股票 TOP15", render_telegram(report))
             self.assertIn("技术面", report["stocks"][0]["reason"]["basis"])
             self.assertIn("基本面", report["stocks"][0]["reason"]["basis"])
+            self.assertIn("消息面", report["stocks"][0]["reason"]["basis"])
             self.assertIn("已纳入", report["stocks"][0]["reason"]["fundamental"])
+            self.assertIn("原文", report["stocks"][0]["reason"]["news"])
             payload = json.loads(artifacts.json_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["market"], "us")
             self.assertEqual(payload["stage"], "midday")

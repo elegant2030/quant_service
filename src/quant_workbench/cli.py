@@ -10,6 +10,7 @@ from quant_workbench.ai.openai_client import OpenAIResearchClient
 from quant_workbench.backtest.engine import BacktestEngine
 from quant_workbench.core.models import AssetClass, Bar, Currency, Exchange, Instrument
 from quant_workbench.derivatives.options import OptionType, black_scholes, implied_volatility
+from quant_workbench.events.pit import ingest_events, run_due_events
 from quant_workbench.fundamentals.pit import ingest_fundamentals, run_due_fundamentals
 from quant_workbench.jobs.ingestion import (
     ingest_cached_bars,
@@ -262,6 +263,41 @@ def command_fundamentals_due(args: argparse.Namespace) -> None:
         state.close()
 
 
+def command_ingest_events(args: argparse.Namespace) -> None:
+    store, state = _open_stores(args.root)
+    try:
+        result = ingest_events(
+            store,
+            state,
+            args.market,
+            Path(args.universe or f"data/cache/sector_probe/universe_{args.market}.csv"),
+            date.fromisoformat(args.run_date) if args.run_date else date.today(),
+            symbols=args.symbols,
+            limit=args.limit,
+            lookback_days=args.lookback_days,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        state.close()
+
+
+def command_events_due(args: argparse.Namespace) -> None:
+    store, state = _open_stores(args.root)
+    try:
+        result = run_due_events(
+            store,
+            state,
+            Path(args.universe_directory),
+            _parse_now(args.now),
+            lookback_days=args.lookback_days,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.strict and result["status"] != "ok":
+            raise SystemExit(2)
+    finally:
+        state.close()
+
+
 def command_ops_status(args: argparse.Namespace) -> None:
     store, state = _open_stores(args.root)
     try:
@@ -487,6 +523,28 @@ def build_parser() -> argparse.ArgumentParser:
     fundamentals_due.add_argument("--now", help="测试用ISO时间；无时区时按UTC")
     fundamentals_due.add_argument("--strict", action="store_true")
     fundamentals_due.set_defaults(func=command_fundamentals_due)
+
+    events = subparsers.add_parser(
+        "ingest-events", help="采集带发布时间和原文链接的美股新闻/A股公告"
+    )
+    events.add_argument("--market", choices=["us", "cn"], required=True)
+    events.add_argument("--root", default=str(DEFAULT_LAKE))
+    events.add_argument("--universe")
+    events.add_argument("--symbols", nargs="+")
+    events.add_argument("--limit", type=int)
+    events.add_argument("--lookback-days", type=int, default=14)
+    events.add_argument("--run-date")
+    events.set_defaults(func=command_ingest_events)
+
+    events_due = subparsers.add_parser("events-due", help="按市场收盘时间刷新消息事件")
+    events_due.add_argument("--root", default=str(DEFAULT_LAKE))
+    events_due.add_argument(
+        "--universe-directory", default="data/cache/sector_probe"
+    )
+    events_due.add_argument("--lookback-days", type=int, default=14)
+    events_due.add_argument("--now", help="测试用ISO时间；无时区时按UTC")
+    events_due.add_argument("--strict", action="store_true")
+    events_due.set_defaults(func=command_events_due)
 
     option_snapshot = subparsers.add_parser("snapshot-options", help="保存研究用美股期权链每日快照")
     option_snapshot.add_argument("--symbols", nargs="+", default=["SPY", "QQQ"])

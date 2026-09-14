@@ -11,7 +11,7 @@ from __future__ import annotations
 import io
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from math import sqrt
 from pathlib import Path
 from typing import Any, Callable
@@ -366,6 +366,103 @@ def _apply_fundamental_scores(cross: Any, fundamentals: Any | None) -> Any:
     return merged
 
 
+def _load_recent_events(store: DatasetStore, market: str, as_of: datetime) -> Any | None:
+    try:
+        import duckdb
+    except ImportError:
+        return None
+    root = store.root / "canonical" / "dataset=events" / f"market={market}"
+    if not list(root.rglob("*.parquet")):
+        return None
+    connection = duckdb.connect()
+    try:
+        return connection.execute(
+            """
+            SELECT * EXCLUDE(row_number) FROM (
+              SELECT *, row_number() OVER (
+                PARTITION BY event_id, symbol ORDER BY retrieved_at DESC
+              ) AS row_number
+              FROM read_parquet(?, union_by_name=true)
+              WHERE effective_at <= ? AND effective_at >= ?
+            ) WHERE row_number = 1
+            """,
+            [
+                str(root / "**" / "*.parquet"),
+                as_of.astimezone(timezone.utc).isoformat(),
+                (as_of.astimezone(timezone.utc) - timedelta(days=14)).isoformat(),
+            ],
+        ).df()
+    finally:
+        connection.close()
+
+
+def _apply_event_scores(cross: Any, events: Any | None, as_of: datetime) -> Any:
+    import pandas as pd
+
+    defaults = {
+        "news_event_count": 0,
+        "news_directional_count": 0,
+        "news_direction": 0.0,
+        "news_score": pd.NA,
+        "news_top_title": pd.NA,
+        "news_top_url": pd.NA,
+        "news_top_publisher": pd.NA,
+        "news_top_published_at": pd.NA,
+        "news_top_subtype": pd.NA,
+        "news_scoring_method": pd.NA,
+    }
+    if events is None or events.empty:
+        for name, value in defaults.items():
+            cross[name] = value
+        cross["pre_news_score"] = cross["score"]
+        return cross
+    current = as_of.astimezone(timezone.utc)
+    frame = events.copy()
+    frame["direction"] = pd.to_numeric(frame["direction"], errors="coerce").fillna(0.0)
+    frame["confidence"] = pd.to_numeric(frame["confidence"], errors="coerce").fillna(0.0)
+    effective = pd.to_datetime(frame["effective_at"], utc=True, errors="coerce")
+    age_days = (pd.Timestamp(current) - effective).dt.total_seconds().clip(lower=0) / 86400
+    frame["decay"] = 0.5 ** (age_days / 5.0)
+    frame["impact"] = frame["direction"] * frame["confidence"] * frame["decay"]
+    frame["impact_abs"] = frame["impact"].abs()
+    records: list[dict[str, Any]] = []
+    for symbol, group in frame.groupby("symbol"):
+        group = group.sort_values(
+            ["impact_abs", "published_at"], ascending=[False, False]
+        )
+        top = group.iloc[0]
+        denominator = max(float((group["confidence"] * group["decay"]).sum()), 1e-9)
+        direction = max(-2.0, min(2.0, float(group["impact"].sum()) / denominator))
+        records.append(
+            {
+                "symbol": str(symbol),
+                "news_event_count": int(len(group)),
+                "news_directional_count": int((group["direction"] != 0).sum()),
+                "news_direction": direction,
+                "news_score": 50 + direction * 25,
+                "news_top_title": str(top["title"]),
+                "news_top_url": str(top["url"]),
+                "news_top_publisher": str(top.get("publisher") or top["source"]),
+                "news_top_published_at": str(top["published_at"]),
+                "news_top_subtype": str(top["subtype"]),
+                "news_scoring_method": str(top["scoring_method"]),
+            }
+        )
+    merged = cross.merge(pd.DataFrame(records), on="symbol", how="left")
+    for name, value in defaults.items():
+        if name in {"news_event_count", "news_directional_count", "news_direction"}:
+            merged[name] = pd.to_numeric(merged[name], errors="coerce").fillna(value)
+        elif name not in merged:
+            merged[name] = value
+    merged["pre_news_score"] = merged["score"]
+    eligible = merged["news_directional_count"] > 0
+    merged.loc[eligible, "score"] = (
+        merged.loc[eligible, "pre_news_score"] * 0.85
+        + merged.loc[eligible, "news_score"] * 0.15
+    )
+    return merged
+
+
 def _stock_reason(row: dict[str, Any]) -> dict[str, Any]:
     reason_types: list[str] = []
     evidence: list[str] = []
@@ -405,12 +502,20 @@ def _stock_reason(row: dict[str, Any]) -> dict[str, Any]:
         evidence.append(
             "基本面" + ("、".join(fundamental_bits[:2]) if fundamental_bits else "横截面得分有效")
         )
+    news_event_count = int(_number(row.get("news_event_count")))
+    news_direction = _number(row.get("news_direction"))
+    if news_event_count:
+        reason_types.append("消息面")
+        direction_text = (
+            "偏多" if news_direction > 0.15 else "偏空" if news_direction < -0.15 else "中性"
+        )
+        evidence.append(f"消息面{direction_text}，近14日{news_event_count}条")
     if not reason_types:
         reason_types.append("相对强度")
         evidence.append("市场内综合排名靠前")
     return {
         "basis": reason_types,
-        "summary": "；".join(evidence[:3]),
+        "summary": "；".join(evidence[:4]),
         "fundamental": (
             f"已纳入{'（研究快照）' if row.get('source') == 'yfinance_research' else ''}："
             f"{fundamental_coverage}项指标，得分"
@@ -418,7 +523,14 @@ def _stock_reason(row: dict[str, Any]) -> dict[str, Any]:
             if fundamental_coverage >= 2
             else "未纳入：该股票尚无足够的PIT财务数据"
         ),
-        "news": "未纳入：尚无带发布时间与原文证据的事件数据",
+        "news": (
+            f"已纳入（规则评分）：{direction_text}；"
+            f"{str(row.get('news_top_publisher') or '未知来源')}；"
+            f"{str(row.get('news_top_title') or '').replace('|', ' ')[:80]}；"
+            f"[原文]({row.get('news_top_url')})"
+            if news_event_count
+            else "未纳入：近14日无可审计事件"
+        ),
     }
 
 
@@ -429,15 +541,19 @@ def _sector_reason(row: dict[str, Any]) -> dict[str, Any]:
     fundamental_members = int(_number(row.get("fundamental_members")))
     if fundamental_members:
         basis.append("基本面")
+    news_members = int(_number(row.get("news_members")))
+    if news_members:
+        basis.append("消息面")
     return {
         "basis": basis,
         "summary": (
             f"板块当日{_pct(row['return_1'])}、20日{_pct(row['return_20'])}，"
             f"MA20上方占比{_number(row['breadth_20']) * 100:.0f}%"
             + (f"，{fundamental_members}只含基本面" if fundamental_members else "")
+            + (f"，{news_members}只有近期事件" if news_members else "")
         ),
         "fundamental": "已纳入" if fundamental_members else "未纳入",
-        "news": "未纳入",
+        "news": "已纳入" if news_members else "未纳入",
     }
 
 
@@ -456,6 +572,8 @@ def _select_rankings(cross: Any) -> tuple[list[dict[str, Any]], list[dict[str, A
                 lambda values: int((values >= 2).sum()),
             ),
             fundamental_score=("fundamental_score", "mean"),
+            news_members=("news_event_count", lambda values: int((values > 0).sum())),
+            news_score=("news_score", "mean"),
         )
         .reset_index()
     )
@@ -521,6 +639,17 @@ def _select_rankings(cross: Any) -> tuple[list[dict[str, Any]], list[dict[str, A
         "revenue_growth",
         "earnings_growth",
         "debt_to_assets",
+        "pre_news_score",
+        "news_event_count",
+        "news_directional_count",
+        "news_direction",
+        "news_score",
+        "news_top_title",
+        "news_top_url",
+        "news_top_publisher",
+        "news_top_published_at",
+        "news_top_subtype",
+        "news_scoring_method",
     ]
     sector_rows = top_sectors.to_dict(orient="records")
     stock_rows = cross.loc[selected_indexes, columns].to_dict(orient="records")
@@ -581,6 +710,7 @@ def _pct(value: Any) -> str:
 
 def render_markdown(report: dict[str, Any]) -> str:
     fundamental_symbols = report["evidence_coverage"]["fundamental"]["symbols"]
+    news_symbols = report["evidence_coverage"]["news"]["symbols"]
     lines = [
         f"# Quant Workbench {report['market_name']}{report['stage_name']}报告",
         "",
@@ -594,7 +724,12 @@ def render_markdown(report: dict[str, Any]) -> str:
             if fundamental_symbols
             else "> 当前尚无可用的 PIT 财务数据，本版不会冒充基本面结论。"
         ),
-        "> 新闻事件数据尚未接入，因此消息面仍不参与评分。",
+        (
+            f"> 消息面已纳入近14日可追溯事件，覆盖 {news_symbols} 只股票；"
+            "当前为确定性规则评分，未调用 LLM。"
+            if news_symbols
+            else "> 近14日没有可用事件，本版不会冒充消息面结论。"
+        ),
         "",
         "## 热度板块 TOP 5",
         "",
@@ -612,15 +747,16 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## 候选股票 TOP 15",
             "",
-            "| 排名 | 股票 | 名称 | 板块 | 分数 | 推荐依据 | 具体理由 | 数据缺口 |",
-            "|---:|---|---|---|---:|---|---|---|",
+            "| 排名 | 股票 | 名称 | 板块 | 分数 | 推荐依据 | 具体理由 | 基本面 | 消息面 |",
+            "|---:|---|---|---|---:|---|---|---|---|",
         ]
     )
     for rank, row in enumerate(report["stocks"], 1):
         lines.append(
             f"| {rank} | {row['symbol']} | {row['name']} | {row['sector']} | "
             f"{_number(row['score']):.1f} | {'+'.join(row['reason']['basis'])} | "
-            f"{row['reason']['summary']} | {row['reason']['fundamental']}；消息面未纳入 |"
+            f"{row['reason']['summary']} | {row['reason']['fundamental']} | "
+            f"{row['reason']['news']} |"
         )
     if report["options"]:
         lines.extend(["", "## 期权温度（市场级）", ""])
@@ -636,7 +772,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             "## 使用限制",
             "",
             "免费数据源没有生产 SLA；盘中快照失败会自动退回最近已完成日线。"
-            "候选池存在幸存者偏差，执行前仍需检查公告、财报、流动性、停牌/涨跌停和期权价差。",
+            "候选池存在幸存者偏差；标题规则无法替代公告原文或人工复核，执行前仍需检查"
+            "公告、财报、流动性、停牌/涨跌停和期权价差。",
             "",
         ]
     )
@@ -645,11 +782,13 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 def render_telegram(report: dict[str, Any]) -> str:
     fundamental_symbols = report["evidence_coverage"]["fundamental"]["symbols"]
+    news_symbols = report["evidence_coverage"]["news"]["symbols"]
     lines = [
         f"Quant Workbench {report['market_name']}{report['stage_name']} | "
         f"{report['report_date']} {report['timezone']}",
         f"模式: {report['data_mode']} | 日线 {report['data_as_of']}",
-        f"依据: 技术/量价/风险调整 + 基本面({fundamental_symbols}只)；消息面未纳入",
+        f"依据: 技术/量价/风险调整 + 基本面({fundamental_symbols}只) "
+        f"+ 消息面({news_symbols}只，规则评分)",
         "",
         "热度板块 TOP5",
     ]
@@ -738,6 +877,8 @@ def build_market_brief(
     cross = _cross_section(bars, usable_live)
     fundamentals = _load_latest_fundamentals(store, market, current)
     cross = _apply_fundamental_scores(cross, fundamentals)
+    events = _load_recent_events(store, market, current)
+    cross = _apply_event_scores(cross, events, current)
     sectors, stocks = _select_rankings(cross)
     data_as_of = str(bars["session_date"].max())
     live_count = len((usable_live or {}).get("rows") or [])
@@ -748,7 +889,7 @@ def build_market_brief(
     else:
         data_mode = "已完成日线（实时快照不可用）"
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "market": market,
         "market_name": MARKET_NAMES[market],
         "timezone": str(market_timezone),
@@ -767,6 +908,8 @@ def build_market_brief(
             "volume_ratio": 0.15,
             "breakout_20": 0.10,
             "low_volatility": 0.10,
+            "fundamental_overlay": 0.25,
+            "news_overlay": 0.15,
         },
         "sectors": sectors,
         "stocks": stocks,
@@ -778,9 +921,16 @@ def build_market_brief(
                 "symbols": int((cross["fundamental_coverage"] >= 2).sum()),
                 "weight": 0.25,
             },
-            "news": "not_available_no_auditable_event_dataset",
+            "news": {
+                "status": "included_when_available",
+                "symbols": int((cross["news_event_count"] > 0).sum()),
+                "directional_symbols": int((cross["news_directional_count"] > 0).sum()),
+                "lookback_days": 14,
+                "weight": 0.15,
+                "method": "deterministic_title_summary_keywords_v1",
+            },
             "options": "market_level_only" if market == "us" else "not_applicable",
-            "llm": "not_called",
+            "llm": "not_called_event_scores_are_deterministic",
         },
         "live_snapshot": {
             "retrieved_at": (usable_live or {}).get("retrieved_at"),
