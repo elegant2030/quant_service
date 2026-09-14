@@ -331,7 +331,10 @@ def _canonical_coverage(store: DatasetStore) -> dict[str, Any]:
                    min(published_at) AS first_published_at,
                    max(published_at) AS last_published_at,
                    sum(CASE WHEN direction != 0 THEN 1 ELSE 0 END) AS directional_rows,
-                   sum(CASE WHEN event_type = 'macro' THEN 1 ELSE 0 END) AS macro_rows
+                   sum(CASE WHEN event_type = 'macro' THEN 1 ELSE 0 END) AS macro_rows,
+                   sum(CASE WHEN tradable_at IS NOT NULL THEN 1 ELSE 0 END) AS tradable_rows,
+                   sum(CASE WHEN material_sha256 IS NOT NULL THEN 1 ELSE 0 END)
+                       AS hashed_material_rows
             FROM read_parquet(?, union_by_name=true)
             GROUP BY market, source ORDER BY market, source
             """,

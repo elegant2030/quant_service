@@ -13,6 +13,7 @@ from quant_workbench.ops.alert import SendResult
 from quant_workbench.reports.market_brief import (
     _apply_event_scores,
     _deliver_market_report,
+    _load_daily_bars,
     _macro_event_context,
     _option_pulse,
     build_market_brief,
@@ -117,6 +118,42 @@ class MacroEventTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_daily_bar_reader_applies_forward_adjustment(self) -> None:
+        rows = []
+        for session, close, factor in (
+            ("2026-09-10", 100.0, 1.0),
+            ("2026-09-11", 50.0, 2.0),
+        ):
+            rows.append(
+                {
+                    "source": "fixture",
+                    "source_symbol": "SPLT",
+                    "symbol": "SPLT",
+                    "market": "us",
+                    "name": "Split Co",
+                    "sector": "Technology",
+                    "session_date": session,
+                    "effective_at": session,
+                    "retrieved_at": "2026-09-14T00:00:00+00:00",
+                    "open": close,
+                    "high": close,
+                    "low": close,
+                    "close": close,
+                    "volume": 1_000.0,
+                    "adj_factor": factor,
+                    "adjustment": "raw",
+                    "schema_version": 2,
+                }
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            store = DatasetStore(directory)
+            store.write_rows(
+                "daily_bars", "us", "fixture", date(2026, 9, 14), rows, "split"
+            )
+            frame = _load_daily_bars(store)
+        self.assertEqual(frame["close"].tolist(), [50.0, 50.0])
+        self.assertEqual(frame["volume"].tolist(), [2_000.0, 1_000.0])
+
     def test_option_pulse_exposes_contract_liquidity_and_straddle_bounds(self) -> None:
         common = {
             "source": "fixture",

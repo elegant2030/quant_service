@@ -101,9 +101,9 @@ def _load_daily_bars(store: DatasetStore) -> Any:
         raise RuntimeError("daily_bars canonical dataset is empty")
     connection = duckdb.connect()
     try:
-        return connection.execute(
+        frame = connection.execute(
             """
-            SELECT market, symbol, name, sector, session_date, close, volume
+            SELECT *
             FROM read_parquet(?, union_by_name=true)
             ORDER BY market, symbol, session_date
             """,
@@ -111,6 +111,12 @@ def _load_daily_bars(store: DatasetStore) -> Any:
         ).df()
     finally:
         connection.close()
+    from quant_workbench.data.adjust import apply_adjustment
+
+    frame = apply_adjustment(frame, mode="forward")
+    frame["close"] = frame["close_adj"]
+    frame["volume"] = frame["volume_adj"]
+    return frame[["market", "symbol", "name", "sector", "session_date", "close", "volume"]]
 
 
 def fetch_us_intraday_snapshot(symbols: list[str]) -> dict[str, Any]:
