@@ -13,6 +13,27 @@ done
 mkdir -p "$RUNTIME_ROOT/config" "$AGENT_ROOT"
 /opt/homebrew/bin/python3.14 -m venv "$RUNTIME_ROOT/venv"
 "$RUNTIME_ROOT/venv/bin/python" -m pip install "${PROJECT_ROOT}[data,ops]"
+# The version number rarely changes, so pip would otherwise keep the stale copy.
+"$RUNTIME_ROOT/venv/bin/python" -m pip install --no-deps --force-reinstall --no-cache-dir \
+  "${PROJECT_ROOT}"
+
+# Refuse to deploy if the installed package differs from the source tree.
+"$RUNTIME_ROOT/venv/bin/python" - "$PROJECT_ROOT/src/quant_workbench" <<'PY'
+import hashlib, pathlib, sys
+import quant_workbench
+source = pathlib.Path(sys.argv[1])
+installed = pathlib.Path(quant_workbench.__file__).parent
+digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+drift = [
+    str(path.relative_to(source))
+    for path in sorted(source.rglob("*.py"))
+    if not (installed / path.relative_to(source)).is_file()
+    or digest(path) != digest(installed / path.relative_to(source))
+]
+if drift:
+    sys.exit("deploy aborted: installed package differs from source: " + ", ".join(drift[:10]))
+print(f"installed package matches source ({installed})")
+PY
 
 install -m 644 "$PROJECT_ROOT/data/cache/sector_probe/universe_us.csv" \
   "$RUNTIME_ROOT/config/universe_us.csv"
