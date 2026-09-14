@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 
-PROJECT_ROOT="/Users/lucky/Documents/ChatGPT/Quant"
+PROJECT_ROOT="${QW_PROJECT_ROOT:-/Users/lucky/Documents/ChatGPT/Quant}"
 RUNTIME_ROOT="/Users/lucky/Library/Application Support/QuantWorkbench"
 AGENT_ROOT="/Users/lucky/Library/LaunchAgents"
 DOMAIN="gui/501"
@@ -43,8 +43,8 @@ install -m 644 "$PROJECT_ROOT/data/cache/sector_probe/universe_cn.csv" \
 "$RUNTIME_ROOT/venv/bin/quant-workbench" ops-init --root "$RUNTIME_ROOT/data"
 
 # Record what was deployed so health/latest.json can expose build_sha / deployed_at.
-BUILD_SHA="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null)" ]]; then
+BUILD_SHA="${QW_BUILD_SHA:-$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+if [[ -z "${QW_BUILD_SHA:-}" && -n "$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null)" ]]; then
   BUILD_SHA="${BUILD_SHA}-dirty"
 fi
 printf '{"build_sha": "%s", "deployed_at": "%s"}\n' "$BUILD_SHA" \

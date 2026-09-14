@@ -342,6 +342,7 @@ def command_market_report(args: argparse.Namespace) -> None:
     try:
         report, artifacts = build_market_brief(
             store,
+            args.market,
             args.stage,
             _parse_now(args.now),
             fetch_live=not args.no_live,
@@ -351,6 +352,7 @@ def command_market_report(args: argparse.Namespace) -> None:
             json.dumps(
                 {
                     "status": "ok",
+                    "market": report["market"],
                     "stage": report["stage"],
                     "sectors": len(report["sectors"]),
                     "stocks": len(report["stocks"]),
@@ -466,9 +468,10 @@ def build_parser() -> argparse.ArgumentParser:
     alert_test.set_defaults(func=command_alert_test)
 
     market_report = subparsers.add_parser(
-        "market-report", help="生成并推送盘前、盘中或盘后双市场热度报告"
+        "market-report", help="生成并推送指定市场的盘前、盘中或盘后热度报告"
     )
     market_report.add_argument("--root", default=str(DEFAULT_LAKE))
+    market_report.add_argument("--market", choices=["us", "cn"], required=True)
     market_report.add_argument(
         "--stage", choices=["premarket", "midday", "postmarket"], required=True
     )
