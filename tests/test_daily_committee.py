@@ -9,6 +9,7 @@ from pathlib import Path
 
 from quant_workbench.reports.daily_committee import (
     EXPERT_ROLES,
+    _canonical_coverage,
     build_daily_committee,
     load_skill_pack,
 )
@@ -72,6 +73,38 @@ class FakeCommitteeClient:
 
 
 class DailyCommitteeTests(unittest.TestCase):
+    def test_coverage_accepts_legacy_bars_without_adjustment_factor_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = DatasetStore(directory)
+            store.write_rows(
+                "daily_bars",
+                "us",
+                "fixture",
+                date(2026, 9, 14),
+                [
+                    {
+                        "source": "fixture",
+                        "source_symbol": "AAPL",
+                        "symbol": "AAPL",
+                        "market": "us",
+                        "session_date": "2026-09-11",
+                        "effective_at": "2026-09-11",
+                        "retrieved_at": "2026-09-14T00:00:00+00:00",
+                        "open": 100.0,
+                        "high": 102.0,
+                        "low": 99.0,
+                        "close": 101.0,
+                        "volume": 1_000_000,
+                        "adjustment": "provider_adjusted",
+                        "schema_version": 1,
+                    }
+                ],
+                "legacy",
+            )
+            coverage = _canonical_coverage(store)
+        self.assertEqual(coverage["daily_bars"][0]["symbols"], 1)
+        self.assertEqual(coverage["daily_bars"][0]["factor_rows"], 0)
+
     def test_skill_pack_reads_every_directory_and_hashes_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

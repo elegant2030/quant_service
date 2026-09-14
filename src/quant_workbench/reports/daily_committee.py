@@ -241,28 +241,69 @@ def _query_dataset(store: DatasetStore, dataset: str, sql: str) -> list[dict[str
         return []
     connection = duckdb.connect()
     try:
-        frame = connection.execute(
-            sql,
-            [str(store.root / "canonical" / f"dataset={dataset}" / "**" / "*.parquet")],
-        ).df()
+        try:
+            frame = connection.execute(
+                sql,
+                [str(store.root / "canonical" / f"dataset={dataset}" / "**" / "*.parquet")],
+            ).df()
+        except Exception as exc:
+            return [{"status": "query_failed", "reason": f"{type(exc).__name__}: {exc}"}]
         return frame.to_dict(orient="records")
     finally:
         connection.close()
 
 
+def _dataset_columns(store: DatasetStore, dataset: str) -> set[str]:
+    files = list((store.root / "canonical" / f"dataset={dataset}").rglob("*.parquet"))
+    if not files:
+        return set()
+    try:
+        import pyarrow.parquet as parquet
+    except ImportError:
+        return set()
+    columns: set[str] = set()
+    for path in files:
+        try:
+            columns.update(parquet.read_schema(path).names)
+        except Exception:
+            continue
+    return columns
+
+
 def _canonical_coverage(store: DatasetStore) -> dict[str, Any]:
     """Summarize evidence already present so the LLM does not report it as absent."""
+    bar_columns = _dataset_columns(store, "daily_bars")
+    raw_schema = (
+        "sum(CASE WHEN schema_version >= 2 THEN 1 ELSE 0 END)"
+        if "schema_version" in bar_columns
+        else "0"
+    )
+    factor_rows = (
+        "sum(CASE WHEN adj_factor IS NOT NULL THEN 1 ELSE 0 END)"
+        if "adj_factor" in bar_columns
+        else "0"
+    )
+    dividend_rows = (
+        "sum(CASE WHEN COALESCE(dividend, 0) > 0 THEN 1 ELSE 0 END)"
+        if "dividend" in bar_columns
+        else "0"
+    )
+    split_rows = (
+        "sum(CASE WHEN COALESCE(split_ratio, 0) > 0 THEN 1 ELSE 0 END)"
+        if "split_ratio" in bar_columns
+        else "0"
+    )
     return {
         "daily_bars": _query_dataset(
             store,
             "daily_bars",
-            """
+            f"""
             SELECT market, count(*) AS rows, count(DISTINCT symbol) AS symbols,
                    min(session_date) AS first_session, max(session_date) AS last_session,
-                   sum(CASE WHEN schema_version >= 2 THEN 1 ELSE 0 END) AS raw_schema_rows,
-                   sum(CASE WHEN adj_factor IS NOT NULL THEN 1 ELSE 0 END) AS factor_rows,
-                   sum(CASE WHEN COALESCE(dividend, 0) > 0 THEN 1 ELSE 0 END) AS dividend_rows,
-                   sum(CASE WHEN COALESCE(split_ratio, 0) > 0 THEN 1 ELSE 0 END) AS split_rows
+                   {raw_schema} AS raw_schema_rows,
+                   {factor_rows} AS factor_rows,
+                   {dividend_rows} AS dividend_rows,
+                   {split_rows} AS split_rows
             FROM read_parquet(?, union_by_name=true)
             GROUP BY market ORDER BY market
             """,
