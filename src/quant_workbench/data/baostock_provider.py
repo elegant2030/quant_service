@@ -66,6 +66,58 @@ class BaoStockProvider:
             rows.append(dict(zip(result.fields, result.get_row_data(), strict=True)))
         return rows
 
+    INDEX_QUERIES = {
+        "hs300": "query_hs300_stocks",
+        "zz500": "query_zz500_stocks",
+        "sz50": "query_sz50_stocks",
+    }
+    EXCHANGE_BY_PREFIX = {"sh": "SSE", "sz": "SZSE", "bj": "BSE"}
+
+    @classmethod
+    def _split_code(cls, code: str) -> tuple[str, str] | None:
+        prefix, _, symbol = code.partition(".")
+        exchange = cls.EXCHANGE_BY_PREFIX.get(prefix)
+        return (symbol, exchange) if exchange and symbol else None
+
+    def industry_classification(self) -> list[dict[str, str]]:
+        """Current CSRC industry for every listed A share (one query, ~5,500 rows)."""
+        result: list[dict[str, str]] = []
+        for row in self._rows(self._query(self.bs.query_stock_industry)):
+            parsed = self._split_code(row.get("code", ""))
+            industry = (row.get("industry") or "").strip()
+            if parsed is None or not industry:
+                continue
+            result.append(
+                {
+                    "symbol": parsed[0],
+                    "exchange": parsed[1],
+                    "name": row.get("code_name", ""),
+                    "code": industry,
+                    "taxonomy_label": row.get("industryClassification", ""),
+                    "source_updated_at": row.get("updateDate", ""),
+                }
+            )
+        return result
+
+    def index_constituents(self, index_code: str) -> list[dict[str, str]]:
+        if index_code not in self.INDEX_QUERIES:
+            raise ValueError(f"unsupported index: {index_code}")
+        query = getattr(self.bs, self.INDEX_QUERIES[index_code])
+        result: list[dict[str, str]] = []
+        for row in self._rows(self._query(query)):
+            parsed = self._split_code(row.get("code", ""))
+            if parsed is None:
+                continue
+            result.append(
+                {
+                    "symbol": parsed[0],
+                    "exchange": parsed[1],
+                    "name": row.get("code_name", ""),
+                    "source_updated_at": row.get("updateDate", ""),
+                }
+            )
+        return result
+
     def build_universe(self, target_size: int = 220) -> UniverseBuildResult:
         industry_rows = self._rows(self.bs.query_stock_industry())
         industry_by_code = {

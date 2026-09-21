@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 BACKDATED_SUFFIX = ":backdated"
 
@@ -167,3 +167,82 @@ def classification_store_from_universe(
                 )
             )
     return ClassificationStore(memberships)
+
+
+def classification_store_from_snapshots(rows: Iterable[Mapping[str, Any]]) -> ClassificationStore:
+    """Build a store from ``industry_classification`` snapshot rows.
+
+    Each snapshot says "on the capture date this listing was in ``code``". Consecutive
+    snapshots with the same code merge into one membership; a change closes the old
+    membership the day before the snapshot that first showed the new code. Nothing is
+    known before the first capture (``available_from`` = its ``retrieved_at``), so
+    backtests over earlier dates see no classification rather than today's.
+    """
+    grouped: dict[tuple[str, str, int], list[tuple[datetime, str, str, str]]] = {}
+    for row in rows:
+        captured = datetime.fromisoformat(str(row["retrieved_at"]))
+        _require_aware(captured, "retrieved_at")
+        key = (
+            f"{row['exchange']}:{str(row['symbol']).upper()}",
+            str(row["taxonomy"]),
+            int(row["level"]),
+        )
+        grouped.setdefault(key, []).append(
+            (captured, str(row["code"]), str(row.get("name") or row["code"]), str(row["source"]))
+        )
+    memberships: list[ClassificationMembership] = []
+    for (instrument_id, taxonomy, level), observations in grouped.items():
+        observations.sort(key=lambda item: item[0])
+        runs: list[tuple[datetime, str, str]] = []
+        for captured, code, _name, source in observations:
+            if not runs or runs[-1][1] != code:
+                runs.append((captured, code, source))
+        for index, (captured, code, source) in enumerate(runs):
+            following = runs[index + 1][0] if index + 1 < len(runs) else None
+            memberships.append(
+                ClassificationMembership(
+                    instrument_id=instrument_id,
+                    taxonomy=taxonomy,
+                    level=level,
+                    code=code,
+                    name=code,
+                    valid_from=captured.date(),
+                    available_from=captured,
+                    # Two captures on one day with a change: the old code stays valid for
+                    # that day and the newer capture wins through its later clock.
+                    valid_to=(
+                        max(captured.date(), following.date() - timedelta(days=1))
+                        if following
+                        else None
+                    ),
+                    source=f"{source}:snapshot",
+                )
+            )
+    return ClassificationStore(memberships)
+
+
+def load_classification_store(
+    root: Any, market: str, taxonomy: str | None = None
+) -> ClassificationStore:
+    """Read every ``industry_classification`` snapshot for ``market`` from a data lake."""
+    from pathlib import Path as _Path
+
+    import duckdb
+
+    pattern = _Path(root) / "canonical" / "dataset=industry_classification" / f"market={market}"
+    if not list(pattern.rglob("*.parquet")):
+        return ClassificationStore()
+    connection = duckdb.connect()
+    try:
+        frame = connection.execute(
+            """
+            SELECT exchange, symbol, taxonomy, level, code, name, source, retrieved_at
+            FROM read_parquet(?, union_by_name=true)
+            """,
+            [str(pattern / "**" / "*.parquet")],
+        ).df()
+    finally:
+        connection.close()
+    if taxonomy is not None:
+        frame = frame[frame["taxonomy"] == taxonomy]
+    return classification_store_from_snapshots(frame.to_dict(orient="records"))

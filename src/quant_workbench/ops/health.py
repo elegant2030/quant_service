@@ -55,6 +55,52 @@ def read_build_info(store: DatasetStore) -> dict[str, Any]:
     }
 
 
+MONTHLY_SNAPSHOT_GRACE_DAYS = 5
+CONSENSUS_GRACE_DAYS = 4
+
+
+def _snapshot_freshness(
+    state: StateStore, current: datetime, errors: list[str], warnings: list[str]
+) -> dict[str, Any]:
+    """Point-in-time snapshots cannot be back-filled, so a missed capture is a permanent
+    hole: never captured -> warning, overdue beyond the grace period -> error."""
+    from quant_workbench.jobs.snapshots import (
+        CONSENSUS_DATASET,
+        INDUSTRY_DATASET,
+        SOURCE,
+        UNIVERSE_DATASET,
+    )
+
+    report: dict[str, Any] = {}
+    for market in MARKETS:
+        expected = latest_completed_session(market, current, availability_delay=timedelta(hours=3))
+        month = expected.isoformat()[:7]
+        for name, source, dataset in (
+            ("universe", "universe_file", UNIVERSE_DATASET),
+            ("industry", SOURCE[market], INDUSTRY_DATASET),
+        ):
+            watermark = state.get_watermark(source, dataset, market)
+            report[f"{name}_{market}"] = {"expected_month": month, "watermark": watermark}
+            if watermark is None:
+                warnings.append(f"{market} {name} snapshot never captured")
+            elif watermark[:7] < month:
+                message = f"{market} {name} snapshot stale: {watermark[:7]} < {month}"
+                if expected.day > MONTHLY_SNAPSHOT_GRACE_DAYS:
+                    errors.append(message)
+                else:
+                    warnings.append(message)
+    expected = latest_completed_session("us", current, availability_delay=timedelta(hours=3))
+    watermark = state.get_watermark("yfinance", CONSENSUS_DATASET, "us")
+    report["consensus_us"] = {"expected_session": expected.isoformat(), "watermark": watermark}
+    if watermark is None:
+        warnings.append("us consensus snapshot never captured")
+    elif watermark[:10] < (expected - timedelta(days=CONSENSUS_GRACE_DAYS)).isoformat():
+        errors.append(f"us consensus snapshot stale: {watermark[:10]} < {expected}")
+    elif watermark[:10] < expected.isoformat():
+        warnings.append(f"us consensus snapshot behind: {watermark[:10]} < {expected}")
+    return report
+
+
 def build_health_report(
     store: DatasetStore,
     state: StateStore,
@@ -118,6 +164,8 @@ def build_health_report(
     if option_date is None or option_date < option_expected.isoformat():
         errors.append(f"options snapshot stale: {option_date} < {option_expected}")
 
+    snapshot_health = _snapshot_freshness(state, current, errors, warnings)
+
     sources = state.status(limit=0)["sources"]
     for source in sources:
         if source["circuit_open_until"]:
@@ -141,6 +189,7 @@ def build_health_report(
         "sqlite_integrity": database_integrity,
         "markets": market_health,
         "options": options_health,
+        "snapshots": snapshot_health,
         "sources": sources,
         "manifests_checked": manifests_checked,
         "checksums_verified": verify_checksums,

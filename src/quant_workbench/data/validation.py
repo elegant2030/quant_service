@@ -87,3 +87,44 @@ def validate_option_row(row: dict[str, Any]) -> list[str]:
     except (KeyError, TypeError, ValueError):
         errors.append("invalid_numeric_value")
     return errors
+
+
+def validate_snapshot_row(row: dict[str, Any]) -> list[str]:
+    """Shared rules for snapshot datasets: provenance plus ``effective_at`` equal to the
+    capture time (a snapshot is only known from the moment it was taken)."""
+    errors = _missing(row, PROVENANCE_FIELDS | {"exchange"})
+    if row.get("effective_at") and row.get("retrieved_at"):
+        if str(row["effective_at"]) > str(row["retrieved_at"]):
+            errors.append("effective_after_retrieved")
+    return errors
+
+
+def validate_classification_row(row: dict[str, Any]) -> list[str]:
+    return validate_snapshot_row(row) + _missing(row, {"taxonomy", "level", "code"})
+
+
+def validate_index_constituent_row(row: dict[str, Any]) -> list[str]:
+    return validate_snapshot_row(row) + _missing(row, {"index_code"})
+
+
+def validate_consensus_row(row: dict[str, Any]) -> list[str]:
+    errors = _missing(row, PROVENANCE_FIELDS | {"record_type"})
+    record_type = row.get("record_type")
+    if record_type not in {"estimate", "target"}:
+        errors.append("invalid_record_type")
+    if record_type == "estimate" and not row.get("period"):
+        errors.append("missing:period")
+    for name in ("eps_analysts", "revenue_analysts"):
+        value = row.get(name)
+        try:
+            if value is not None and float(value) < 0:
+                errors.append(f"negative:{name}")
+        except (TypeError, ValueError):
+            errors.append(f"invalid:{name}")
+    low, high = row.get("eps_low"), row.get("eps_high")
+    try:
+        if low is not None and high is not None and float(low) > float(high):
+            errors.append("eps_low_above_high")
+    except (TypeError, ValueError):
+        errors.append("invalid:eps_range")
+    return errors

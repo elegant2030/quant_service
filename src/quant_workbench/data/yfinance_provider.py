@@ -314,6 +314,68 @@ class YFinanceProvider:
             )
         return snapshots
 
+    EXCHANGE_MAP = {"NMS": "NASDAQ", "NYQ": "NYSE", "ASE": "AMEX"}
+
+    def sector_members(
+        self, max_per_sector: int = 250, minimum_market_cap: int = 500_000_000
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Current Yahoo sector for the largest US listings (one screen per sector)."""
+        members: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for sector in US_SECTORS:
+            try:
+                query = self.yf.EquityQuery(
+                    "and",
+                    [
+                        self.yf.EquityQuery("eq", ["region", "us"]),
+                        self.yf.EquityQuery("eq", ["sector", sector]),
+                        self.yf.EquityQuery("is-in", ["exchange", *self.EXCHANGE_MAP]),
+                        self.yf.EquityQuery("gt", ["intradaymarketcap", minimum_market_cap]),
+                    ],
+                )
+                response = self.yf.screen(
+                    query, size=min(250, max_per_sector), sortField="intradaymarketcap", sortAsc=False
+                )
+                for quote in response.get("quotes", []):
+                    exchange = self.EXCHANGE_MAP.get(str(quote.get("exchange")))
+                    symbol = str(quote.get("symbol") or "")
+                    if not exchange or not symbol:
+                        continue
+                    members.append(
+                        {
+                            "symbol": symbol,
+                            "exchange": exchange,
+                            "name": str(quote.get("shortName") or quote.get("longName") or symbol),
+                            "code": sector,
+                            "market_cap": quote.get("marketCap"),
+                            "quote_type": quote.get("quoteType"),
+                        }
+                    )
+            except Exception as exc:
+                errors.append(f"{sector}: {type(exc).__name__}: {exc}")
+        return members, errors
+
+    def consensus(self, symbol: str) -> dict[str, Any]:
+        """Analyst estimates as currently published (no history exists upstream).
+
+        Returns plain records so callers can persist the raw payload unchanged.
+        """
+        ticker = self.yf.Ticker(symbol)
+
+        def records(frame: Any) -> list[dict[str, Any]]:
+            if frame is None or getattr(frame, "empty", True):
+                return []
+            return frame.reset_index().to_dict(orient="records")
+
+        return {
+            "earnings_estimate": records(ticker.earnings_estimate),
+            "revenue_estimate": records(ticker.revenue_estimate),
+            "eps_trend": records(ticker.eps_trend),
+            "eps_revisions": records(ticker.eps_revisions),
+            "price_targets": dict(ticker.analyst_price_targets or {}),
+            "recommendations": records(ticker.recommendations_summary),
+        }
+
     def option_expirations(self, symbol: str) -> tuple[str, ...]:
         return tuple(self.yf.Ticker(symbol).options)
 

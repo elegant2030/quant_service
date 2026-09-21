@@ -19,6 +19,7 @@ from quant_workbench.jobs.ingestion import (
     snapshot_options,
 )
 from quant_workbench.jobs.orchestrator import run_due_jobs
+from quant_workbench.jobs.snapshots import snapshot_consensus, snapshot_industry, snapshot_universe
 from quant_workbench.ops.alert import (
     notify_health_report,
     notify_pipeline_report,
@@ -401,6 +402,34 @@ def command_watchdog(args: argparse.Namespace) -> None:
         state.close()
 
 
+def command_snapshot(args: argparse.Namespace) -> None:
+    store, state = _open_stores(args.root)
+    run_date = date.fromisoformat(args.run_date) if args.run_date else date.today()
+    universe_path = Path(args.universe or f"data/cache/sector_probe/universe_{args.market}.csv")
+    try:
+        if args.kind == "universe":
+            lease, result, details = snapshot_universe(
+                store, state, args.market, universe_path, run_date
+            )
+        elif args.kind == "industry":
+            lease, result, details = snapshot_industry(store, state, args.market, run_date)
+        else:
+            lease, result, details = snapshot_consensus(
+                store, state, args.market, universe_path, run_date, limit=args.limit
+            )
+        output = {
+            "job": f"snapshot_{args.kind}",
+            "market": args.market,
+            "acquired": lease.acquired,
+            "reason": lease.reason,
+            "path": str(result.path) if result else None,
+            "details": details,
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
+    finally:
+        state.close()
+
+
 def command_run_due(args: argparse.Namespace) -> None:
     store, state = _open_stores(args.root)
     try:
@@ -413,6 +442,7 @@ def command_run_due(args: argparse.Namespace) -> None:
             Path(args.universe_directory),
             args.option_symbols,
             now,
+            snapshots=not args.no_snapshots,
         )
         if not args.no_alerts:
             report["alerts"] = notify_pipeline_report(store, report)
@@ -721,6 +751,20 @@ def build_parser() -> argparse.ArgumentParser:
     run_due.add_argument("--now", help="测试用ISO时间；无时区时按UTC")
     run_due.add_argument("--strict", action="store_true")
     run_due.add_argument("--no-alerts", action="store_true", help="不推送 Telegram 告警")
+    run_due.add_argument("--no-snapshots", action="store_true", help="跳过月度/每日 PIT 快照作业")
+
+    for kind, description in (
+        ("universe", "月度股票池快照（A股同时保存沪深300/中证500/上证50成分）"),
+        ("industry", "月度行业/板块分类快照（A股证监会行业，美股Yahoo板块）"),
+        ("consensus", "每日分析师一致预期快照（仅美股）"),
+    ):
+        snapshot = subparsers.add_parser(f"snapshot-{kind}", help=description)
+        snapshot.add_argument("--market", choices=["us", "cn"], required=True)
+        snapshot.add_argument("--root", default=str(DEFAULT_LAKE))
+        snapshot.add_argument("--universe")
+        snapshot.add_argument("--run-date")
+        snapshot.add_argument("--limit", type=int, default=None, help="只处理前 N 只（调试用）")
+        snapshot.set_defaults(func=command_snapshot, kind=kind)
     run_due.set_defaults(func=command_run_due)
     return parser
 

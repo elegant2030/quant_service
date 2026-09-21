@@ -187,7 +187,15 @@ class DatasetStore:
         os.close(descriptor)
         temporary = Path(temporary_name)
         try:
-            table = pa.Table.from_pylist(accepted)
+            # ``from_pylist`` infers columns from the first row only and silently drops
+            # keys that first appear later, so align every row to the union of keys.
+            columns: dict[str, None] = {}
+            for row in accepted:
+                for name in row:
+                    columns.setdefault(name, None)
+            table = pa.Table.from_pylist(
+                [{name: row.get(name) for name in columns} for row in accepted]
+            )
             metadata = dict(table.schema.metadata or {})
             metadata.update(
                 {

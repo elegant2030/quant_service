@@ -189,9 +189,12 @@ LaunchAgent  pipeline / watchdog / backup
 - `quant-workbench backfill-daily --market us|cn` 全量重拉并把旧 schema 1 分区移到 `archive/<日期>/`（不删除），输出新旧价格差异分布
 - 验收（开发数据湖）：美股 167,471 行 / A 股 162,811 行，各 220 只，0 行隔离；同参数重跑两次原始收盘价逐行一致（最大差 0）；新前复权价与原 provider 复权价中位差 1e-7 量级、无一行超过 0.1%，即现有回测结论不受影响。已知来源特性：Yahoo 把 SCCO 股票股利记为 1.005 等小拆股；BaoStock 000002 在 2025-01-09 有一个 <1 的因子，导致其前复权价与 BaoStock 自家复权序列差 1.2%（唯一超过 0.1% 的股票）；停牌期间的除权日因子顺延到下一交易日（600027 2024-07-25）；BaoStock 匿名会话会被其他进程登录顶掉，provider 已自动重登
 
-### T2 快照作业（审查 1.2/1.4/2.3）
-- `snapshot-universe`（月初）、`snapshot-consensus`（每日）、`snapshot-industry`（月初）、期权快照固定 16:15 ET 后并写 `iv_history`
-- 验收：raw gzip + canonical 各一份；orchestrator 到期规则；watchdog 新鲜度项
+### T2 快照作业（审查 1.2/1.4/2.3）— 代码完成、开发数据湖实跑验收 2026-09-21；后台待部署
+- `jobs/snapshots.py`：`snapshot-universe`（月度；A 股附带沪深300/中证500/上证50 成分 → `index_constituents`）、`snapshot-industry`（月度；A 股证监会行业 ~5,200 只，美股 Yahoo 板块 ~2,150 只 → `industry_classification`）、`snapshot-consensus`（每日，仅美股 → `consensus_estimates`，每只 4 个期间的 EPS/营收预期、30/60/90 日趋势、上下修次数，加一行目标价与评级分布）。全部 `effective_at = retrieved_at`，raw gzip + canonical 各一份
+- `run-due` 自动判断到期（月度看水位月份，日度看最近已完成美股交易日），`--no-snapshots` 可跳过；watchdog 新增新鲜度：从未采集 → warning，月度超过当月 5 号未采 / 一致预期落后 4 天以上 → error。快照缺了就是永久空洞，不能回填
+- `core/classification.py::load_classification_store(root, market, taxonomy)` 把行业快照拼成 PIT 成员关系：首次采集前查询返回空，分类变更时自动截断旧成员。`SectorMomentum` 用它就不再需要 `backdate_to` 前视假设，但要等快照积累出历史
+- 期权 `iv_history` 不在此范围：期权数据由另一个 agent 负责
+- 顺带修复：`store/files.py::write_rows` 以前只按第一行的键建列，后续行多出的列被静默丢弃
 
 ### T3 EDGAR 采集 + 事件三表 schema（原 P0-1 + 审查 4.1）
 - `data/providers/edgar.py`（edgartools），`filings_index` / `filings_text` 数据集，水位用 `accession_no`

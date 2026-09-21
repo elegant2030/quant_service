@@ -85,3 +85,16 @@ canonical `dataset=daily_bars` 从 schema 2 开始只存**原始成交价 + 单�
 - 两种口径的收益率完全一致。`schema_version=1` 的旧行没有因子，按 1 处理并在 `adjustment_applied=False` 标出。
 
 验收（CLAUDE.md T1）：同一 `(symbol, session_date)` 重跑两次 `close` 不变；`backfill-daily` 输出 `comparison`，给出新前复权价与旧复权价的差异分布，用来解释回测结果变化。已知限制：yfinance 若事后修正历史成交价（数据修复而非公司行动），原始价仍会变化，这属于来源数据质量问题，由校验"与已入库同键值对比"拦截（待实现）。
+
+## PIT 快照数据集（2026-09-21 起）
+
+免费源只给"当前"口径，历史只能靠自己从现在开始存。四个数据集都是整份快照，`effective_at = retrieved_at`，分析时取"不晚于决策时点的最近一份"。
+
+| 数据集 | 频率 | 来源 | 自然键 | 主要列 |
+|---|---|---|---|---|
+| `universe_snapshot` | 月 | 配置的股票池 CSV | (market, snapshot_month, symbol) | exchange, name, sector, market_cap, universe_file |
+| `index_constituents` | 月 | BaoStock | (index_code, snapshot_month, symbol) | index_code ∈ hs300 / zz500 / sz50, source_updated_at |
+| `industry_classification` | 月 | BaoStock（证监会行业，`taxonomy=CSRC`）、yfinance 板块筛选（`taxonomy=YF_SECTOR`，市值 5 亿美元以上） | (market, snapshot_month, symbol, taxonomy, level) | code, name, source_updated_at |
+| `consensus_estimates` | 日 | yfinance | (symbol, retrieved_at, record_type, period) | `record_type=estimate`：eps_/revenue_ 的 avg/low/high/analysts/year_ago/growth，eps_trend_{current,7d,30d,60d,90d}，eps_{up,down}_{7d,30d}；`record_type=target`：price_current，target_{mean,median,low,high}，rating_* |
+
+限制：美股没有干净的免费指数成分源，暂不采；A 股一致预期（东财盈利预测）访问不稳定，暂不采；Yahoo 板块是 Yahoo 自己的分类，不是 GICS。

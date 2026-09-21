@@ -31,6 +31,30 @@ def valid_bar() -> dict[str, object]:
     }
 
 
+class DatasetStoreSchemaTests(unittest.TestCase):
+    def test_columns_that_first_appear_in_later_rows_are_kept(self) -> None:
+        import pyarrow.parquet as pq
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = DatasetStore(Path(directory))
+            result = store.write_rows(
+                "mixed",
+                "us",
+                "test",
+                date(2026, 9, 21),
+                [{"symbol": "A", "eps": 1.0}, {"symbol": "B", "target": 9.5}],
+                "mixed-rows",
+            )
+            table = pq.read_table(result.path).to_pylist()
+        self.assertEqual(
+            table,
+            [
+                {"symbol": "A", "eps": 1.0, "target": None},
+                {"symbol": "B", "eps": None, "target": 9.5},
+            ],
+        )
+
+
 class StateStoreTests(unittest.TestCase):
     def test_successful_job_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
