@@ -385,13 +385,20 @@ class YFinanceNewsProvider:
 
 class CninfoAnnouncementProvider:
     def __init__(self, fetcher: Callable[..., Any] | None = None) -> None:
+        self._client: Any | None = None
         self.fetcher = fetcher or self._fetch
 
-    @staticmethod
-    def _fetch(**kwargs: Any) -> Any:
-        import akshare as ak
+    def _fetch(self, **kwargs: Any) -> Any:
+        # AKShare's helper is rejected with 403 (default python-requests User-Agent) and
+        # re-downloads the stock dictionary per symbol; use the project's own client,
+        # which keeps one dictionary and paces requests for the whole run.
+        from quant_workbench.data.cninfo_client import CninfoClient
 
-        return ak.stock_zh_a_disclosure_report_cninfo(**kwargs)
+        if self._client is None:
+            self._client = CninfoClient()
+        return self._client.announcements(
+            kwargs["symbol"], kwargs["start_date"], kwargs["end_date"]
+        )
 
     def fetch(
         self, symbol: str, since: datetime, retrieved_at: datetime
@@ -406,7 +413,7 @@ class CninfoAnnouncementProvider:
             start_date=start,
             end_date=end,
         )
-        raw = frame.to_dict(orient="records")
+        raw = frame.to_dict(orient="records") if hasattr(frame, "to_dict") else list(frame)
         rows: list[dict[str, Any]] = []
         for item in raw:
             title = str(item.get("公告标题") or "").strip()
