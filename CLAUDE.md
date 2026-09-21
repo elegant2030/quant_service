@@ -147,6 +147,10 @@ LaunchAgent  pipeline / watchdog / backup
 - `.claude/skills/qw-event-scoring` 事件打分、taxonomy、事件研究（附枚举表）
 - `.claude/skills/qw-options-snapshot-review` 期权快照流动性过滤、指标口径、IV 历史
 - `.claude/skills/qw-ops-triage` 后台排查、部署、回滚、备份演练
+- `.claude/skills/qw-residual-edge` 收益拆成基准暴露与残差边际（HAC 回归、α/β、滚动稳定性），T4 写超额时必用
+- `.claude/skills/qw-report-data-check` 报告出门前的确定性检查：日期星期、配置合计、量级、单位、红线 1 措辞、回测数字限定语
+- `.claude/skills/qw-thesis-tracker` 可证伪的研究论点记录与校验，对应预期账本的 thesis；不含目标价、止损、仓位
+- 2026-09-21 另从 ml4t/skills 增装 12 个通用 skill（风险指标、绩效报告、过拟合、数据泄漏、IC、非平稳、市场状态、日历、agent 治理三件套、因子研究），来源、版本与取舍见 `.claude/skills/README.md`
 - `docs/PROJECT_REVIEW_2026-09-13.md`、`docs/FRAMEWORK_INTEGRATION.md`
 - `AGENTS.md`（已合并规程摘要）
 

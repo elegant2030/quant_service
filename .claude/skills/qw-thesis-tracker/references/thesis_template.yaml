@@ -1,0 +1,85 @@
+# Quant Workbench thesis record. One file per instrument: research/theses/<market>_<symbol>.yaml
+# Validate with: .venv/bin/python .claude/skills/qw-thesis-tracker/scripts/validate_thesis.py <file>
+schema_version: 1
+instrument:
+  symbol: ACME
+  market: us            # us | cn
+  exchange: NASDAQ
+created_at: "2026-09-21"
+last_reviewed_at: "2026-09-21"
+status: active          # active | weakened | falsified | retired | watching
+
+# One or two sentences. A directional view of the FUNDAMENTALS, not an instruction.
+statement: >
+  Pricing power plus software mix shift should lift operating margin faster than the
+  published consensus assumes over the next four quarters.
+
+# What the record is measured against (see CLAUDE.md 5.2 expectation ledger).
+expectation_gap:
+  driver: operating_margin          # volume | price | margin | capex | share_count | other
+  own_estimate: "FY2027 operating margin 24%-26%"
+  consensus_reference: "consensus_estimates snapshot 2026-09-21, period +1y"
+  basis: "deterministic driver model v3, see evidence E1"
+
+pillars:                 # 3 to 5
+  - id: P1
+    claim: "Software revenue share exceeds 40% by FY2027"
+    metric: "software_revenue / total_revenue from 10-Q segment note"
+    expectation: ">= 0.40 by FY2027 Q2"
+    kill_criterion: "share below 0.33 for two consecutive quarters"
+    current: "0.36 (FY2026 Q2)"
+    trend: on_track      # on_track | ahead | behind | broken | pending
+    evidence: [E1]
+  - id: P2
+    claim: "List price increases stick without volume loss"
+    metric: "price/mix vs volume disclosure in earnings release"
+    expectation: "price/mix >= +4% with volume >= -1%"
+    kill_criterion: "volume decline worse than -3% in any quarter after a price increase"
+    current: "price/mix +5.1%, volume -0.4%"
+    trend: on_track
+    evidence: [E2]
+  - id: P3
+    claim: "Operating leverage: opex grows slower than revenue"
+    metric: "opex growth minus revenue growth, trailing four quarters"
+    expectation: "<= -2 percentage points"
+    kill_criterion: "positive for two consecutive quarters"
+    current: "pending next filing"
+    trend: pending
+    evidence: []
+
+risks:                   # 3 to 5, things that would invalidate the thesis
+  - "Largest customer (18% of revenue) renegotiates pricing"
+  - "Competitor bundles an equivalent product at zero marginal price"
+  - "FX: 45% of revenue in EUR"
+
+catalysts:
+  - date: "2026-10-28"
+    event: "FY2026 Q3 earnings (AMC)"
+    tests_pillars: [P1, P2, P3]
+    tradable_at_note: "after-market release: effective next session open"
+
+valuation_anchor:        # descriptive range from deterministic code; never a price target
+  method: "EV/EBIT range of listed peers, snapshot 2026-09-21"
+  observed_range: "14x-19x"
+  note: "context only; not a target price"
+
+evidence:
+  - id: E1
+    kind: filing          # filing | announcement | transcript | dataset | news
+    reference: "10-Q accession 0000000000-26-000123"
+    published_at: "2026-08-01T20:05:00+00:00"
+    material_sha256: "<sha256 of the stored raw document>"
+  - id: E2
+    kind: filing
+    reference: "8-K Item 2.02, 2026-07-30"
+    published_at: "2026-07-30T20:10:00+00:00"
+    material_sha256: "<sha256>"
+
+updates:                 # append only; never rewrite history
+  - date: "2026-09-21"
+    data_point: "Thesis opened"
+    source_event_id: null
+    pillar_impacts: []
+    disconfirming: false
+    evidence_strength: medium     # low | medium | high
+    note: "Initial record"
