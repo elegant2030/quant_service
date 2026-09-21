@@ -9,7 +9,7 @@ description: 在 Quant Workbench 仓库中新增或修改数据源（provider）
 
 ## 开工前确认
 
-1. 开发只在 `/Users/lucky/Documents/ChatGPT/Quant` 进行，不碰 `Application Support/QuantWorkbench`。
+1. 开发只在 `/Users/lucky/Workspace/Quant` 进行，不碰 `Application Support/QuantWorkbench`。
 2. 先看 `src/quant_workbench/data/`、`store/files.py`、`store/state.py`、`jobs/ingestion.py`，沿用现有分区、原子写、水位和锁，不新造平行机制。
 3. 想清楚这个数据集的三个时间：
    - `retrieved_at`：我们什么时候拉到的（总是有）。

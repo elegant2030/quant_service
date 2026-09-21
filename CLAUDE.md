@@ -25,7 +25,7 @@
 
 | 用途 | 路径 |
 |---|---|
-| 开发仓库（改代码只在这里） | `/Users/lucky/Documents/ChatGPT/Quant` |
+| 开发仓库（改代码只在这里） | `/Users/lucky/Workspace/Quant` |
 | 开发 venv | `.venv/` |
 | 开发数据（gitignored） | `data/cache/`、`data/lake/` |
 | 后台运行时（不要直接改） | `/Users/lucky/Library/Application Support/QuantWorkbench` |
@@ -216,7 +216,7 @@ LaunchAgent  pipeline / watchdog / backup
 ## 11. 常用命令
 
 ```bash
-cd '/Users/lucky/Documents/ChatGPT/Quant'
+cd '/Users/lucky/Workspace/Quant'
 source .venv/bin/activate
 
 # 开工检查

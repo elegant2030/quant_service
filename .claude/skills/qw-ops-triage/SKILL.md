@@ -6,7 +6,7 @@ description: 排查和维护 Quant Workbench 的后台运行：LaunchAgent（pip
 # 运维排查
 
 两个铁律：
-1. 源码只在 `/Users/lucky/Documents/ChatGPT/Quant` 改；`Application Support/QuantWorkbench` 里的是非 editable 安装副本，改了会被下次部署覆盖。
+1. 源码只在 `/Users/lucky/Workspace/Quant` 改；`Application Support/QuantWorkbench` 里的是非 editable 安装副本，改了会被下次部署覆盖。
 2. 不手改 Parquet / SQLite。修数据走 CLI 重跑或 quarantine 复核。
 
 ## 排查顺序
@@ -52,7 +52,7 @@ ls -lt '/Users/lucky/Library/Application Support/QuantWorkbench/data/quarantine'
 ## 部署与回滚
 
 ```bash
-cd '/Users/lucky/Documents/ChatGPT/Quant'
+cd '/Users/lucky/Workspace/Quant'
 .venv/bin/python -m unittest discover -s tests -v      # 先测
 ./ops/deploy_macos_runtime.sh                           # 再部署
 # 验收

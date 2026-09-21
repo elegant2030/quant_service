@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 
-PROJECT_ROOT="${QW_PROJECT_ROOT:-/Users/lucky/Documents/ChatGPT/Quant}"
+PROJECT_ROOT="${QW_PROJECT_ROOT:-/Users/lucky/Workspace/Quant}"
 RUNTIME_ROOT="/Users/lucky/Library/Application Support/QuantWorkbench"
 AGENT_ROOT="/Users/lucky/Library/LaunchAgents"
 DOMAIN="gui/501"

@@ -23,10 +23,10 @@ Quant Workbench 的目标是搭建一个覆盖以下资产和研究任务的完�
 
 | 用途 | 绝对地址 | 说明 |
 |---|---|---|
-| 开发仓库 | `/Users/lucky/Documents/ChatGPT/Quant` | 修改源码、测试、研究脚本和文档的唯一位置 |
-| 开发虚拟环境 | `/Users/lucky/Documents/ChatGPT/Quant/.venv` | 手动开发和测试使用 |
-| 开发数据缓存 | `/Users/lucky/Documents/ChatGPT/Quant/data/cache` | 历史下载缓存、当前分析 JSON；被 Git 忽略 |
-| 开发数据湖 | `/Users/lucky/Documents/ChatGPT/Quant/data/lake` | 开发运行数据；被 Git 忽略 |
+| 开发仓库 | `/Users/lucky/Workspace/Quant` | 修改源码、测试、研究脚本和文档的唯一位置 |
+| 开发虚拟环境 | `/Users/lucky/Workspace/Quant/.venv` | 手动开发和测试使用 |
+| 开发数据缓存 | `/Users/lucky/Workspace/Quant/data/cache` | 历史下载缓存、当前分析 JSON；被 Git 忽略 |
+| 开发数据湖 | `/Users/lucky/Workspace/Quant/data/lake` | 开发运行数据；被 Git 忽略 |
 | 后台独立运行时 | `/Users/lucky/Library/Application Support/QuantWorkbench` | LaunchAgent 实际运行位置；不要在这里直接改源码 |
 | 后台运行虚拟环境 | `/Users/lucky/Library/Application Support/QuantWorkbench/venv` | 安装后的非 editable 包 |
 | 后台生产数据 | `/Users/lucky/Library/Application Support/QuantWorkbench/data` | Parquet、原始快照、SQLite、健康状态、日志和备份 |
@@ -153,7 +153,7 @@ AI 只能负责语义理解和解释，禁止负责价格、收益、Greeks、�
 ### 7.2 当前市场截面
 
 完整报告：[CURRENT_MARKET_ANALYSIS_2026-09-11.md](../reports/CURRENT_MARKET_ANALYSIS_2026-09-11.md)  
-机器可读结果：`/Users/lucky/Documents/ChatGPT/Quant/data/cache/current_analysis/analysis_2026-09-11.json`
+机器可读结果：`/Users/lucky/Workspace/Quant/data/cache/current_analysis/analysis_2026-09-11.json`
 
 - 美股状态为“中性”：218 只参与分析，20/60/120 日均线上方比例为 33.94%/48.17%/56.88%；相对强势板块是能源、金融和基础材料。
 - 当前美股一致趋势候选包括 PSX、MPC、VLO、MUFG、HSBC 等；它们是候选池，不是买入指令。
@@ -180,7 +180,7 @@ AI 只能负责语义理解和解释，禁止负责价格、收益、Greeks、�
 
 `launchctl` 显示 `state = not running` 在这里通常代表一次性任务当前处于等待下一触发时间，并不等于任务未加载；应结合 `runs` 和 `last exit code` 判断。
 
-模板位于：`/Users/lucky/Documents/ChatGPT/Quant/ops/launchd/`
+模板位于：`/Users/lucky/Workspace/Quant/ops/launchd/`
 
 ### 8.2 运行数据目录
 
@@ -209,14 +209,14 @@ AI 只能负责语义理解和解释，禁止负责价格、收益、Greeks、�
 从开发仓库重新部署后台运行时：
 
 ```bash
-cd '/Users/lucky/Documents/ChatGPT/Quant'
+cd '/Users/lucky/Workspace/Quant'
 ./ops/deploy_macos_runtime.sh
 ```
 
 停用三个后台任务：
 
 ```bash
-cd '/Users/lucky/Documents/ChatGPT/Quant'
+cd '/Users/lucky/Workspace/Quant'
 ./ops/disable_macos_agents.sh
 ```
 
@@ -227,7 +227,7 @@ cd '/Users/lucky/Documents/ChatGPT/Quant'
 在开发环境运行：
 
 ```bash
-cd '/Users/lucky/Documents/ChatGPT/Quant'
+cd '/Users/lucky/Workspace/Quant'
 source .venv/bin/activate
 
 quant-workbench ops-init
@@ -260,7 +260,7 @@ quant-workbench ops-status
 下一位 Agent 开始修改前，建议依次执行：
 
 ```bash
-cd '/Users/lucky/Documents/ChatGPT/Quant'
+cd '/Users/lucky/Workspace/Quant'
 git status --short
 .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/ruff check \
@@ -342,9 +342,9 @@ launchctl print gui/501/com.quantworkbench.backup
 
 ```text
 请先完整阅读：
-/Users/lucky/Documents/ChatGPT/Quant/docs/AGENT_HANDOFF.md
+/Users/lucky/Workspace/Quant/docs/AGENT_HANDOFF.md
 
-项目开发目录是 /Users/lucky/Documents/ChatGPT/Quant；后台生产运行目录是
+项目开发目录是 /Users/lucky/Workspace/Quant；后台生产运行目录是
 /Users/lucky/Library/Application Support/QuantWorkbench。不要直接修改后台运行目录。
 
 开始工作前先运行 git status 和现有测试，保护所有未跟踪的用户文件。遵守文档中的
