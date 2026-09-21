@@ -184,11 +184,10 @@ LaunchAgent  pipeline / watchdog / backup
 ### T0 保护现状
 提醒用户创建首次提交并打 tag；在此之前不做任何删除/重构。
 
-### T1 日线改为原始价 + 复权因子（审查 2.1/2.4）— 代码完成、开发数据湖已回填验收 2026-09-13；后台待回填
+### T1 日线改为原始价 + 复权因子（审查 2.1/2.4）— 已完成：开发湖 2026-09-13 验收，后台生产湖 2026-09-14 回填（旧分区在 `archive/2026-09-14/`），2026-09-21 核对后台日线全部为 schema 2、无重复键
 - schema_version 2：`open/high/low/close/volume` 存真实成交价（yfinance 的拆股回溯已还原，含分红金额），`dividend`、`split_ratio`、`adj_factor`（单次事件后复权因子）、`adjustment=raw`；复权在读取时用 `data/adjust.py::apply_adjustment(mode="forward"|"back")` 计算。数据字典见 `docs/DATA_SOURCE_DECISION.md`
 - `quant-workbench backfill-daily --market us|cn` 全量重拉并把旧 schema 1 分区移到 `archive/<日期>/`（不删除），输出新旧价格差异分布
 - 验收（开发数据湖）：美股 167,471 行 / A 股 162,811 行，各 220 只，0 行隔离；同参数重跑两次原始收盘价逐行一致（最大差 0）；新前复权价与原 provider 复权价中位差 1e-7 量级、无一行超过 0.1%，即现有回测结论不受影响。已知来源特性：Yahoo 把 SCCO 股票股利记为 1.005 等小拆股；BaoStock 000002 在 2025-01-09 有一个 <1 的因子，导致其前复权价与 BaoStock 自家复权序列差 1.2%（唯一超过 0.1% 的股票）；停牌期间的除权日因子顺延到下一交易日（600027 2024-07-25）；BaoStock 匿名会话会被其他进程登录顶掉，provider 已自动重登
-- 后台生产湖回填需用户确认后执行（会归档旧分区、重拉 440 只全量）
 
 ### T2 快照作业（审查 1.2/1.4/2.3）
 - `snapshot-universe`（月初）、`snapshot-consensus`（每日）、`snapshot-industry`（月初）、期权快照固定 16:15 ET 后并写 `iv_history`
@@ -279,3 +278,4 @@ launchctl print gui/501/com.quantworkbench.pipeline | grep -E 'state|last exit|r
 - 已核对为真：单测通过；选择性 ruff 通过；仓库无 `.env`、无密钥字符串；三个 LaunchAgent 已加载且最近 exit 0；后台 health `status=ok`，美股/A 股水位 2026-09-11，quarantine 为空。
 - T5 已部署验收：后台 `health/latest.json` 带 `build_sha`、`deployed_at`、`alerts`；Telegram 测试消息、错误告警、去重、恢复消息均已实收。
 - 部署脚本现在会强制重装包并比对源码，pip 因版本号不变而跳过安装的漂移问题已修（2026-09-13）。
+- 2026-09-21：后台已部署到含 quant_service 并入和 CNInfo 修复的版本。A 股事件采集此前在大陆白天时段 100% 失败（AKShare 用默认 python-requests UA 被巨潮 403，且每只股票重下一次 60 万字节字典），已改用 `data/cninfo_client.py`：如实标识的 UA、字典每轮一次、0.25 秒限速、分页上限 10。后台现有 agent 共六个：pipeline / watchdog / backup / reports / fundamentals / events。
