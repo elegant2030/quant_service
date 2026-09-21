@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from math import sqrt
 from statistics import fmean, pstdev
 from typing import Sequence
 
 from quant_workbench.backtest.rules import CostModel, TradingRules
+from quant_workbench.core.classification import ClassificationStore
 from quant_workbench.core.models import Bar, EquityPoint, Fill, Side, TargetWeight
-from quant_workbench.strategy.base import Strategy
+from quant_workbench.strategy.base import ContextStrategy, Strategy, StrategyContext
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class BacktestResult:
     fills: tuple[Fill, ...]
     rejected_orders: tuple[str, ...]
     metrics: dict[str, float]
+    corporate_actions: tuple[str, ...] = ()
 
 
 class BacktestEngine:
@@ -37,13 +39,52 @@ class BacktestEngine:
         cost_model: CostModel | None = None,
         trading_rules: TradingRules | None = None,
         rebalance_every: int = 5,
+        classifications: ClassificationStore | None = None,
+        apply_corporate_actions: bool = True,
     ):
         self.initial_cash = initial_cash
         self.cost_model = cost_model or CostModel()
         self.trading_rules = trading_rules or TradingRules()
         self.rebalance_every = rebalance_every
+        self.classifications = classifications or ClassificationStore()
+        self.apply_corporate_actions = apply_corporate_actions
 
-    def run(self, bars: Sequence[Bar], strategy: Strategy) -> BacktestResult:
+    @staticmethod
+    def _knowledge_clock(session: date) -> datetime:
+        """Decisions made after the close of ``session`` execute at the next open, so
+        everything published by the end of that calendar day (UTC) is knowable."""
+        return datetime.combine(session, time(23, 59, 59), timezone.utc)
+
+    def _apply_corporate_action(self, bar: Bar, position: Position) -> tuple[Decimal, str | None]:
+        """Adjust a held position for the bar's ex-date facts; returns (cash, note).
+
+        Raw bars record what happened on the session: ``split_ratio`` scales the share
+        count, ``dividend`` pays cash per share (post-split terms). Sources that only
+        give a combined ``adj_factor`` (BaoStock) are handled as a cost-free total
+        return reinvestment, which may leave fractional lots.
+        """
+        if position.quantity == 0:
+            return Decimal("0"), None
+        key = bar.instrument.id
+        stamp = bar.timestamp.date().isoformat()
+        cash = Decimal("0")
+        notes: list[str] = []
+        if bar.split_ratio is not None and bar.split_ratio != 1:
+            position.quantity *= bar.split_ratio
+            position.average_cost /= bar.split_ratio
+            notes.append(f"split x{bar.split_ratio}")
+        if bar.dividend is not None and bar.dividend > 0:
+            cash = position.quantity * bar.dividend * bar.instrument.multiplier
+            notes.append(f"dividend {bar.dividend}/share cash {cash}")
+        if not notes and bar.adj_factor is not None and bar.adj_factor != 1:
+            position.quantity *= bar.adj_factor
+            position.average_cost /= bar.adj_factor
+            notes.append(f"reinvested adj_factor x{bar.adj_factor}")
+        if not notes:
+            return Decimal("0"), None
+        return cash, f"{stamp} {key}: " + ", ".join(notes)
+
+    def run(self, bars: Sequence[Bar], strategy: Strategy | ContextStrategy) -> BacktestResult:
         by_time: dict[object, dict[str, Bar]] = defaultdict(dict)
         for bar in bars:
             by_time[bar.timestamp][bar.instrument.id] = bar
@@ -58,8 +99,19 @@ class BacktestEngine:
         last_prices: dict[str, Decimal] = {}
         instruments = {bar.instrument.id: bar.instrument for bar in bars}
 
+        corporate_actions: list[str] = []
+        uses_context = isinstance(strategy, ContextStrategy)
+
         for index, timestamp in enumerate(timeline):
             current = by_time[timestamp]
+            if self.apply_corporate_actions:
+                # Ex-date effects apply before the open, ahead of any pending orders.
+                for key, bar in current.items():
+                    if key in positions:
+                        received, note = self._apply_corporate_action(bar, positions[key])
+                        cash += received
+                        if note:
+                            corporate_actions.append(note)
             prices = {**last_prices, **{key: bar.open for key, bar in current.items()}}
             equity_at_open = cash + sum(
                 position.quantity
@@ -149,9 +201,26 @@ class BacktestEngine:
             )
             curve.append(EquityPoint(timestamp, close_equity, cash, gross))
             if index % self.rebalance_every == 0:
-                pending = list(strategy.targets(history))
+                if uses_context:
+                    session = timestamp.date()
+                    context = StrategyContext(
+                        now=self._knowledge_clock(session),
+                        session=session,
+                        step=index,
+                        history=history,
+                        classifications=self.classifications,
+                    )
+                    pending = list(strategy.targets_in_context(context))
+                else:
+                    pending = list(strategy.targets(history))
 
-        return BacktestResult(tuple(curve), tuple(fills), tuple(rejected), self._metrics(curve))
+        return BacktestResult(
+            tuple(curve),
+            tuple(fills),
+            tuple(rejected),
+            self._metrics(curve),
+            tuple(corporate_actions),
+        )
 
     @staticmethod
     def _metrics(curve: Sequence[EquityPoint]) -> dict[str, float]:

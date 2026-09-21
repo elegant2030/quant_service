@@ -57,7 +57,7 @@ LaunchAgent  pipeline / watchdog / backup
 - `store/files.py` Parquet/raw/manifest/原子写；`store/state.py` SQLite 控制面
 - `jobs/ingestion.py` 采集；`jobs/orchestrator.py` 按交易日历判断到期
 - `ops/calendar.py`（XNYS/XSHG，最近已完成交易日）、`ops/health.py`、`ops/backup.py`、`ops/lock.py`
-- `backtest/`、`strategy/`（横截面动量）、`fundamentals/scoring.py`（评分模型基础，不是 PIT 数据）
+- `core/classification.py` PIT 板块/行业成员（`valid_from/valid_to` + `available_from` 知识时钟）；`backtest/`（引擎在除权日处理拆股、分红、因子再投资）、`strategy/`（横截面动量、板块动量 `SectorMomentum`、带时钟的 `ContextStrategy`）、`fundamentals/scoring.py`（评分模型基础，不是 PIT 数据）
 - `derivatives/options.py`（BS/Greeks/IV）、`derivatives/perpetual.py`
 - `ai/openai_client.py`（Responses API + 结构化输出；当前机器无 OPENAI_API_KEY，现有报告未调用 LLM）
 - `cli.py`（入口 `quant-workbench`）；`scripts/run_strategy_research.py`、`scripts/run_current_market_analysis.py`
@@ -267,6 +267,10 @@ launchctl print gui/501/com.quantworkbench.pipeline | grep -E 'state|last exit|r
 - 每次修改先跑测试与相关 ruff，再改文档；改动涉及 canonical 写入时先在开发数据湖跑通。
 - 涉及删除数据、重置状态、部署到后台、创建/改写 Git 历史、调用付费 API 批量任务：先说明影响并等用户确认。
 - 报告写"做了什么、没做什么、结论适用范围"，不写"建议买入"。
+
+## 14.1 quant_service 原型并入（2026-09-20）
+
+`/Users/lucky/Workspace/quant_service`（2026-08 的独立原型，非 git）已停止开发，只维护本仓库。已移植：PIT 分类存储、`StrategyContext` / `ContextStrategy`、板块动量基线、公司行为进回测账本；对照表和未移植原因见 `docs/legacy_quant_service/README.md`。注意：免费源没有历史板块成员，`classification_store_from_universe(..., backdate_to=...)` 属于前视假设，来源会标 `:backdated`，用它跑出的回测只能标"描述性"。真正的 PIT 成员要靠 T2 的 `snapshot-industry` / `snapshot-universe` 从现在开始积累。
 
 ## 15. 仓库实际状态核对（2026-09-13 由 Claude Code 核对）
 
